@@ -71,7 +71,10 @@ From WSL on the desktop use the same Tailscale address; the WSL gateway address
 does not reach the daemon.
 
 Check: `node cm2d.js state` (or `curl http://desktop:7777/state`), `node cm2d.js demo`
-walks six fake sessions through every colour, `type cm2d.log` on the desktop.
+walks six fake sessions through every colour, `node cm2d.js press AG00` simulates
+a pad key, `type cm2d.log` on the desktop. The pad commands (`status`, `backup`,
+`restore`, `setup-keys`) pause the daemon while they own the HID channel and
+resume it afterwards.
 
 ## Keycaps (WRK MX Icon set + clear caps)
 
@@ -116,7 +119,14 @@ explicit `{effect,color,brightness}`), `actions` (which ACT keys are approve/rej
 * The pad has no way to focus a session in the Claude desktop app, so an agent
   key press selects and acknowledges, nothing more.
 * One daemon owns the pad. `run` writes `cm2d.pid` and retires any older instance
-  on startup; if the pad ever freezes, `node cm2d.js restart` is the reset.
+  on startup (asking it to quit gracefully first, so it blanks the pad); if the
+  pad ever freezes, `node cm2d.js restart` is the reset.
+* `/hook` and `/state` are open to whatever can reach the port (your tailnet);
+  `/key` and `/quit` only answer from the desktop itself. Nothing on the wire is
+  authenticated beyond that, so keep the port off untrusted networks.
+* APPR/REJ answer the selected session's prompt, or the only pending one. With
+  several pending and none selected they do nothing but log; press the amber
+  session's agent key first.
 
 Protocol facts come from the community write-ups
 ([cm2-agent-keys](https://github.com/honest-andy/cm2-agent-keys),

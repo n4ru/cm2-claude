@@ -22,6 +22,7 @@
  *   node cm2d.js install      autostart at logon (Windows scheduled task) + start now
  *   node cm2d.js uninstall
  *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
+ *   node cm2d.js press AG00   simulate a pad key (loopback only)
  *   node cm2d.js state        what the running daemon thinks
  *   node cm2d.js demo         walk fake sessions through every colour
  */
@@ -90,12 +91,23 @@ function isCm2d(pid) {
     return cmd.includes("cm2d.js");
   } catch { return false; }
 }
-function stopDaemon(dir) {
+/** Ask the running daemon to quit over loopback (it blanks the pad first); kill it only if it does not go. */
+async function stopDaemon(dir, port) {
   const pid = readPid(dir);
-  if (alive(pid) && pid !== process.pid && isCm2d(pid)) { try { process.kill(pid); } catch { /* already gone */ } log(`stopped cm2d pid ${pid}`); }
-  else log("no running cm2d");
+  if (!(alive(pid) && pid !== process.pid && isCm2d(pid))) { log("no running cm2d"); try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ } return false; }
+  await new Promise((r) => { const q = http.request({ host: "127.0.0.1", port, path: "/quit", method: "POST", timeout: 1500 }, (res) => { res.resume(); res.on("end", r); }); q.on("error", r); q.on("timeout", () => { q.destroy(); r(); }); q.end(); });
+  for (let i = 0; i < 20 && alive(pid); i++) await sleep(100);
+  if (alive(pid)) { try { process.kill(pid); } catch { /* gone */ } log(`killed cm2d pid ${pid}`); } else log(`stopped cm2d pid ${pid}`);
   try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ }
+  return true;
 }
+/** Hook bodies come off the network: only objects, and a session id that is always a string (it is used as a Map key and sliced for logs). */
+function normalizeEvent(ev) {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return null;
+  if (ev.session_id !== undefined && ev.session_id !== null) ev.session_id = String(ev.session_id);
+  return ev;
+}
+const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
 
 // ---------------------------------------------------------------- framing
 /** Split one JSON-RPC line into 64-byte output reports: [id 6][channel][len][payload…]. */
@@ -129,8 +141,9 @@ class Pad extends EventEmitter {
     this.hid = hid; this.info = info;
     this.bufs = { [CH_DEBUG]: "", [CH_RPC]: "" };
     this.pending = new Map();
-    this.nextId = 1;
+    this.nextId = 1 + Math.floor(Math.random() * 998); // random seed: a CLI and the daemon must never shadow each other's ids
     this.queue = Promise.resolve();
+    this.on("error", (e) => { this.lastError = e; }); // an 'error' with no listener would throw out of node-hid's read callback
     hid.on("data", (b) => this.onReport(b));
     hid.on("error", (e) => this.emit("error", e));
     hid.on("close", () => this.emit("close"));
@@ -222,7 +235,8 @@ class Engine {
       if (this.selected === id) this.selected = null;
       return this.sessions.delete(id);
     }
-    const s = this.session(id, ev), was = s.state, slot = s.slot;
+    const before = this.sessions.get(id)?.slot ?? null; // read before session() may allocate (or steal) a slot
+    const s = this.session(id, ev), was = s.state;
     switch (name) {
       case "SessionStart": if (ev.how_session_started !== "compact") s.state = "idle"; break;
       case "UserPromptSubmit": case "PostToolUse": case "PostToolUseFailure": s.state = "working"; break;
@@ -234,9 +248,9 @@ class Engine {
         break;
       case "Stop": s.state = "unread"; break;
       case "StopFailure": s.state = "error"; break;
-      default: return false;
+      default: return before !== s.slot;
     }
-    return was !== s.state || slot !== s.slot || name === "SessionStart";
+    return was !== s.state || before !== s.slot || name === "SessionStart";
   }
   bySlot(slot) { return [...this.sessions.values()].find((s) => s.slot === slot); }
   /** Agent key pressed: select that session (breathing key) and acknowledge its done/error state. */
@@ -283,9 +297,9 @@ function zone(z, fallbackColor, fallbackBrightness) {
 // ---------------------------------------------------------------- daemon
 async function run(dir) {
   const cfg = loadConfig(dir);
-  const prev = readPid(dir);
-  if (alive(prev) && prev !== process.pid && isCm2d(prev)) { log(`another cm2d (pid ${prev}) is running; stopping it`); try { process.kill(prev); } catch { /* gone */ } await sleep(1500); }
+  if (await stopDaemon(dir, cfg.port)) await sleep(500);
   fs.writeFileSync(pidfile(dir), String(process.pid));
+  process.on("uncaughtException", (e) => log("crash guard:", e.stack || e)); // one bad request or odd key event must not end a weeks-long run
   const engine = new Engine(cfg);
   const holds = new Map(); // session id -> respond(decision|null)
   let pad = null, keysZone = { e: 0, b: 0, s: 0, m: 0, c: 0 }, lastSent = "", device = { connected: false }, pushTimer = null;
@@ -312,21 +326,23 @@ async function run(dir) {
   const schedule = (force) => { clearTimeout(pushTimer); pushTimer = setTimeout(() => push(force), 80); };
 
   function answer(which) {
-    // APPR/REJ target: the selected session's pending prompt, else the newest pending one
+    // APPR/REJ target: the selected session's pending prompt; else the only pending one; several and none selected = ambiguous
     const ids = [...holds.keys()];
-    const id = holds.has(engine.selected) ? engine.selected : ids[ids.length - 1];
-    if (!id) { log(`${which}: nothing pending`); return; }
+    const id = holds.has(engine.selected) ? engine.selected : ids.length === 1 ? ids[0] : null;
+    if (!id) { log(`${which}: ${ids.length ? "ambiguous, press that session's agent key first" : "nothing pending"}`); return; }
     holds.get(id)(which === "approve" ? "allow" : "deny"); holds.delete(id);
     const s = engine.sessions.get(id); if (s) s.state = "working";
     log(`${which} -> ${id.slice(0, 8)}`);
     schedule();
   }
-  function onKey({ key, act }) {
-    if (act !== 1) return;
-    const m = /^AG0([0-5])$/.exec(key || "");
-    if (m) { engine.press(+m[1]); log(`key ${key} -> select ${engine.selected ? engine.selected.slice(0, 8) : "none"}`); return schedule(); }
-    if (key === cfg.actions.approve) return answer("approve");
-    if (key === cfg.actions.reject) return answer("reject");
+  function onKey({ key, act } = {}) {
+    try {
+      if (act !== 1) return;
+      const m = /^AG0([0-5])$/.exec(key || "");
+      if (m) { engine.press(+m[1]); log(`key ${key} -> select ${engine.selected ? engine.selected.slice(0, 8) : "none"}`); return schedule(); }
+      if (key === cfg.actions.approve) return answer("approve");
+      if (key === cfg.actions.reject) return answer("reject");
+    } catch (e) { log("key handler:", e.message); }
   }
 
   const server = http.createServer((req, res) => {
@@ -336,12 +352,17 @@ async function run(dir) {
       if (req.method === "GET" && req.url === "/state") {
         return respond(res, { device, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || "") })) });
       }
-      let ev; try { ev = JSON.parse(body || "{}"); } catch { return respond(res, { error: "bad json" }); }
-      if (req.method === "POST" && req.url === "/key") { onKey(ev); return respond(res); }              // simulate a pad press (testing)
+      let ev; try { ev = normalizeEvent(JSON.parse(body || "{}")); } catch { ev = null; }
+      if (!ev) return respond(res, { error: "bad json" });
+      if (req.method === "POST" && (req.url === "/key" || req.url === "/quit")) {                     // control endpoints: this machine only
+        if (!loopback(req)) { res.writeHead(403); return res.end(); }
+        if (req.url === "/quit") { respond(res); return stop(); }
+        onKey(ev); return respond(res);                                                              // simulate a pad press (`cm2d press`)
+      }
       if (req.method !== "POST" || req.url !== "/hook") { res.writeHead(404); return res.end(); }
       const changed = engine.handle(ev);
       if (changed) { log(`${ev.hook_event_name}${ev.notification_type ? "/" + ev.notification_type : ""} ${String(ev.session_id).slice(0, 8)} -> ${engine.sessions.get(ev.session_id)?.state ?? "gone"} slot ${engine.sessions.get(ev.session_id)?.slot ?? "-"}`); schedule(); }
-      if (ev.hook_event_name !== "PermissionRequest" || !cfg.holdMs || !pad) return respond(res);
+      if (ev.hook_event_name !== "PermissionRequest" || !cfg.holdMs || !pad || !ev.session_id) return respond(res);
       // hold the prompt open for the pad; the hook script's curl timeout must exceed holdMs
       const id = ev.session_id;
       const done = (d) => { clearTimeout(t); holds.delete(id); respond(res, decision(d)); };
@@ -426,21 +447,24 @@ async function main(argv) {
   const post = (u, o) => new Promise((ok, no) => { const r = http.request(`http://127.0.0.1:${cfg.port}${u}`, { method: "POST", headers: { "Content-Type": "application/json" } }, (res) => { res.resume(); res.on("end", ok); }); r.on("error", no); r.end(JSON.stringify(o)); });
   switch (cmd) {
     case "run": return run(dir);
-    case "stop": return stopDaemon(dir);
-    case "restart": stopDaemon(dir); await sleep(1500); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
+    case "stop": return stopDaemon(dir, cfg.port);
+    case "restart": await stopDaemon(dir, cfg.port); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
+    case "press": return post("/key", { key: argv[1], act: 1 });
     case "install": case "uninstall": return taskCmd(dir, cmd);
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
     case "demo": {
       const ids = Array.from({ length: SLOTS }, (_, i) => `demo-${i}-${"x".repeat(30)}`);
       const steps = [["SessionStart"], ["UserPromptSubmit"], ["PermissionRequest"], ["Stop"], ["StopFailure"], ["SessionEnd"]];
       for (const [name] of steps) {
-        for (const [i, id] of ids.entries()) { await post("/hook", { session_id: id, hook_event_name: name, cwd: `/demo/${i}` }); await sleep(120); }
+        for (const [i, id] of ids.entries()) { const q = post("/hook", { session_id: id, hook_event_name: name, cwd: `/demo/${i}` }); if (name !== "PermissionRequest") await q; else q.catch(() => {}); await sleep(120); }
         console.log(name); await sleep(2500);
         if (name === "PermissionRequest") { await post("/key", { key: "AG02", act: 1 }); console.log("  (pressed AG02: selected key breathes)"); await sleep(2500); }
       }
       return;
     }
   }
+  // the pad commands below own the HID channel: pause the daemon (its pushes would interleave with our chunks), resume after
+  const daemonWas = await stopDaemon(dir, cfg.port);
   const pad = await Pad.open();
   try {
     switch (cmd) {
@@ -454,10 +478,13 @@ async function main(argv) {
         await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
-      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|state|demo"); process.exitCode = 2;
+      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|press KEY|state|demo"); process.exitCode = 2;
     }
-  } finally { await pad.close(); }
+  } finally {
+    await pad.close();
+    if (daemonWas) { if (process.platform === "win32") execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); else console.log("daemon was stopped; start it again"); }
+  }
 }
 
-module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, EFFECT, DEFAULTS };
+module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

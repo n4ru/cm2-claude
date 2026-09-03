@@ -20,6 +20,8 @@ const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = r
   let t = 0; const e = new Engine(DEFAULTS, () => t);
   const ev = (session_id, hook_event_name, extra = {}) => e.handle({ session_id, hook_event_name, cwd: "/p/" + session_id, ...extra });
   assert.equal(ev("a", "SessionStart"), true); assert.equal(e.sessions.get("a").slot, 0);
+  assert.equal(ev("z", "Notification", { notification_type: "idle_prompt" }), true); // ignored type, but it just got a key: re-render
+  assert.equal(ev("z", "Notification", { notification_type: "idle_prompt" }), false); ev("z", "SessionEnd");
   assert.equal(ev("a", "UserPromptSubmit"), true); assert.equal(e.sessions.get("a").state, "working");
   assert.equal(ev("a", "PreToolUse", { tool_name: "Bash" }), false);          // still working: nothing to re-render
   assert.equal(ev("a", "PreToolUse", { tool_name: "AskUserQuestion" }), true); assert.equal(e.sessions.get("a").state, "awaiting");
@@ -87,4 +89,8 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   fs.writeFileSync(p.join(d, "cm2d.pid"), String(process.pid)); assert.equal(alive(readPid(d)), true); }
 // pid guard: our own pid is a cm2d process (test.js requires cm2d.js, so the cmdline says test.js — make the check honest)
 { const { isCm2d, alive } = require("./cm2d.js"); assert.equal(alive(process.pid), true); assert.equal(alive(999999), false); assert.equal(typeof isCm2d(process.pid), "boolean"); }
+// hook bodies off the wire: non-objects rejected, session ids coerced to strings (they are Map keys and get sliced for logs)
+{ const { normalizeEvent } = require("./cm2d.js");
+  assert.equal(normalizeEvent(null), null); assert.equal(normalizeEvent([1]), null); assert.equal(normalizeEvent("x"), null);
+  assert.equal(normalizeEvent({ session_id: 1 }).session_id, "1"); assert.equal(normalizeEvent({}).session_id, undefined); }
 console.log("ok");
