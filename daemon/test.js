@@ -1,7 +1,7 @@
 "use strict";
 // No hardware needed: framing bytes, state transitions, slot eviction, zone conversion, keymap rewrite.
 const assert = require("assert");
-const { frame, Engine, zone, agentKeymap, EFFECT, DEFAULTS } = require("./cm2d.js");
+const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = require("./cm2d.js");
 
 // framing: 64-byte reports, [6][2][len][payload], long lines split at 61, non-ASCII escaped
 {
@@ -62,12 +62,16 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
 { const cfg = "off"; const bl = { effect: "solid", color: 0xffffff, brightness: 1 };
   assert.deepEqual(zone(cfg === "keymap" ? bl : cfg === "off" ? null : cfg, 0xffffff, 1), { e: 0, b: 0, s: 0, m: 0, c: 0 }); }
 
-// keymap rewrite: rows 1-2 agent keys, APPR/REJ on row 3 cols 2/3, everything else untouched
+// keymap rewrite: layer 1 gets the layout (agent keys, APPR/REJ, Esc, inert spares); encoders/joystick untouched
 {
   const km = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KC_G", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]], encoders: [["KC_VOLU", "KC_VOLD", "KC_MPLY"]] } }] }] };
-  const out = agentKeymap(km, DEFAULTS.actions).profiles[0].layers[0].layout;
-  assert.deepEqual(out.keymap, [["KV_OAI_AG00", "KV_OAI_AG01"], ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"], ["KC_G", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_J"], ["KC_K", "KC_L", "KC_M"]]);
-  assert.deepEqual(out.encoders, [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]);
+  const out = agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions).profiles[0].layers[0].layout;
+  assert.deepEqual(out.keymap, [["KV_OAI_AG00", "KV_OAI_AG01"], ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"], ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"], ["KC_NONE", "KC_NONE", "KC_NONE"]]);
+  assert.deepEqual(out.encoders, [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]);              // dial untouched
+  const keep = JSON.parse(JSON.stringify(DEFAULTS.layout)); keep[3][0] = null;
+  assert.equal(agentKeymap(km, keep, DEFAULTS.actions).profiles[0].layers[0].layout.keymap[3][0], "KC_NONE"); // null keeps the pad's key
+  assert.throws(() => agentKeymap(km, [["KC_A"]], DEFAULTS.actions), /shape/);       // wrong pad
+  assert.throws(() => agentKeymap(km, DEFAULTS.layout, { approve: "ACT06", reject: "ACT08" }), /ACT06/); // action key missing from layout
 }
 // launcher: the command handed to cmd /c must be wrapped in one outer pair of quotes (cmd strips the first and last)
 {
@@ -76,4 +80,9 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   const cmd = /Run "(.*)", 0, False/.exec(vbs)[1].replace(/""/g, '"');
   assert.ok(cmd.startsWith('cmd /c ""') && cmd.endsWith('2>&1"'), cmd);
 }
+// pidfile guard: missing file -> 0, dead pid -> not alive, our own pid -> alive
+{ const os = require("os"), fs = require("fs"), p = require("path");
+  const d = fs.mkdtempSync(p.join(os.tmpdir(), "cm2d-")); assert.equal(readPid(d), 0);
+  fs.writeFileSync(p.join(d, "cm2d.pid"), "2147480000"); assert.equal(alive(readPid(d)), false); // a pid that will not exist
+  fs.writeFileSync(p.join(d, "cm2d.pid"), String(process.pid)); assert.equal(alive(readPid(d)), true); }
 console.log("ok");

@@ -57,14 +57,20 @@ ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js setup-keys"    #
 ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js install"       # logon task, starts now; `uninstall` reverts
 ```
 
-On every machine that runs Claude Code:
+On every machine that runs Claude Code (rpc and the desktop's WSL are done):
 
 ```bash
 CM2_URL=http://100.124.22.74:7777 hooks/install-hooks.sh     # merges into ~/.claude/settings.json; --remove takes it out
 ```
 
+From WSL on the desktop use the same Tailscale address; the WSL gateway address
+does not reach the daemon.
+
 Check: `node cm2d.js state` (or `curl http://desktop:7777/state`), `node cm2d.js demo`
 walks six fake sessions through every colour, `type cm2d.log` on the desktop.
+After changing config or code, `node cm2d.js restart` retires the running daemon
+(via its pidfile) and relaunches the autostart task, so no stale instance is left
+holding the LEDs.
 
 ## Keycaps (WRK MX Icon set + clear caps)
 
@@ -79,14 +85,19 @@ row 4   [mic/globe]   [⊞ or ★]     [smiley]                     voice = Win+
 ```
 
 Only `run` and `X` talk to cm2d (that is `actions` in the config, ACT07/ACT08).
-The others are ordinary keystrokes: map them in the Input app on the same layer
-(`setup-keys` leaves those positions untouched). Icons are cosmetic; the switch
-positions are what matters.
+`setup-keys` writes the whole of layer 1 from `layout` in the config: by default
+the spare key on row 3 is Esc (interrupts Claude when the app is focused) and the
+other spares are inert, so the pad never types stray letters. Shortcuts that need
+a modifier (Win+H voice typing, Ctrl+N) are Input macros: build those in the Input
+app on the same layer, then put `null` at those positions in `layout` so a later
+`setup-keys` keeps them (or put plain keycodes there and re-run `setup-keys`).
+Icons are cosmetic; the switch positions are what matters.
 
 ## Config
 
 Optional `daemon/config.json`, any subset of the defaults at the top of `cm2d.js`:
-`port`, `holdMs` (0 disables pad approvals), `brightness`, `colors`, `ambient`
+`port`, `holdMs` (0 disables pad approvals), `brightness`, `colors`, `layout`
+(what `setup-keys` writes), `ambient`
 (per-state body ring effect; `idle: {effect: "off"}` mirrors Codex, or give it a
 colour), `keys` (backlight of the non-agent keys: `"off"` by default so the
 status keys pop, like Codex; `"keymap"` for the pad's stored backlight; or an
@@ -94,14 +105,17 @@ explicit `{effect,color,brightness}`), `actions` (which ACT keys are approve/rej
 
 ## Caveats
 
-* Agent keys and APPR/REJ stop typing; they only report to cm2d. `node cm2d.js
-  restore <backup>` puts the old keymap back. The Input app knows the `KV_OAI_*`
+* Agent keys and APPR/REJ stop typing; they only report to cm2d. `setup-keys`
+  saves the previous keymap next to the daemon first; `node cm2d.js restore
+  <backup>` puts it back. The Input app knows the `KV_OAI_*`
   keycodes (its ChatGPT preset uses the same ones) but editing that layer there
   may still rewrite them.
 * Lighting sent over `v.oai.*` is volatile: the pad reverts to its stored
   lighting on power-cycle or layer change, so cm2d re-sends every 30 s.
 * The pad has no way to focus a session in the Claude desktop app, so an agent
   key press selects and acknowledges, nothing more.
+* One daemon owns the pad. `run` writes `cm2d.pid` and retires any older instance
+  on startup; if the pad ever freezes, `node cm2d.js restart` is the reset.
 
 Protocol facts come from the community write-ups
 ([cm2-agent-keys](https://github.com/honest-andy/cm2-agent-keys),

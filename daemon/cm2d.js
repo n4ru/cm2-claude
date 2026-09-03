@@ -21,6 +21,7 @@
  *   node cm2d.js setup-keys   turn rows 1-2 into agent keys, row 3 into APPR/REJ
  *   node cm2d.js install      autostart at logon (Windows scheduled task) + start now
  *   node cm2d.js uninstall
+ *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
  *   node cm2d.js state        what the running daemon thinks
  *   node cm2d.js demo         walk fake sessions through every colour
  */
@@ -53,6 +54,16 @@ const DEFAULTS = {
   },
   keys: "off",          // backlight of the non-agent keys. "off" = dark (what Codex does — the status keys pop); "keymap" = the pad's stored backlight; or {effect,color,brightness,speed}
   actions: { approve: "ACT07", reject: "ACT08" }, // Codex Micro factory caps: ACT07 = APPR, ACT08 = REJ
+  // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
+  // anything else is a plain keycode, null keeps whatever is on the pad. Spare keys default to Esc (interrupt Claude)
+  // and inert; shortcuts with modifiers (Win+H voice typing, Ctrl+N) are Input macros: build them in the Input app,
+  // then set those positions to null here so setup-keys never overwrites them.
+  layout: [
+    ["KV_OAI_AG00", "KV_OAI_AG01"],
+    ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
+    ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"],
+    ["KC_NONE", "KC_NONE", "KC_NONE"],
+  ],
 };
 
 function loadConfig(dir) {
@@ -63,6 +74,19 @@ function loadConfig(dir) {
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------- single instance
+// A stale daemon that lost the pad silently keeps the LEDs frozen; a pidfile lets a
+// new instance (or `restart`) reliably retire the old one instead of racing it.
+const pidfile = (dir) => path.join(dir, "cm2d.pid");
+const readPid = (dir) => { try { return parseInt(fs.readFileSync(pidfile(dir), "utf8"), 10) || 0; } catch { return 0; } };
+const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+function stopDaemon(dir) {
+  const pid = readPid(dir);
+  if (alive(pid) && pid !== process.pid) { try { process.kill(pid); } catch { /* already gone */ } log(`stopped cm2d pid ${pid}`); }
+  else log("no running cm2d");
+  try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ }
+}
 
 // ---------------------------------------------------------------- framing
 /** Split one JSON-RPC line into 64-byte output reports: [id 6][channel][len][payload…]. */
@@ -250,9 +274,13 @@ function zone(z, fallbackColor, fallbackBrightness) {
 // ---------------------------------------------------------------- daemon
 async function run(dir) {
   const cfg = loadConfig(dir);
+  const prev = readPid(dir);
+  if (alive(prev) && prev !== process.pid) { log(`another cm2d (pid ${prev}) is running; stopping it`); try { process.kill(prev); } catch { /* gone */ } await sleep(1500); }
+  fs.writeFileSync(pidfile(dir), String(process.pid));
   const engine = new Engine(cfg);
   const holds = new Map(); // session id -> respond(decision|null)
   let pad = null, keysZone = { e: 0, b: 0, s: 0, m: 0, c: 0 }, lastSent = "", device = { connected: false }, pushTimer = null;
+  let dropPad = null, pushFails = 0; // a handle that stays "open" through BLE sleep answers nothing: after 3 failed pushes, reconnect
 
   const respond = (res, obj) => { res.writeHead(obj ? 200 : 204, { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
@@ -266,8 +294,11 @@ async function run(dir) {
     try {
       await pad.setThreads(threads);
       await pad.setZones(ambient, keysZone);
-      lastSent = payload;
-    } catch (e) { log("push failed:", e.message); }
+      lastSent = payload; pushFails = 0;
+    } catch (e) {
+      log("push failed:", e.message);
+      if (++pushFails >= 3 && dropPad) { log("pad unresponsive, reconnecting"); dropPad(); }
+    }
   }
   const schedule = (force) => { clearTimeout(pushTimer); pushTimer = setTimeout(() => push(force), 80); };
 
@@ -319,6 +350,7 @@ async function run(dir) {
   const stop = async () => {
     log("shutting down");
     if (pad) { try { await pad.setThreads(engine.render().threads.map((t) => ({ ...t, c: 0, b: 0, e: 0 }))); await pad.setZones({ e: 0, b: 0, s: 0, m: 0, c: 0 }, keysZone); } catch { /* best effort */ } await pad.close(); }
+    try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ }
     process.exit(0);
   };
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
@@ -329,6 +361,8 @@ async function run(dir) {
     if (!info) { if (device.connected) log("pad gone"); device = { connected: false }; await sleep(3000); continue; }
     try {
       pad = await Pad.open(info);
+      // listen from the first moment: an 'error' with no listener would throw and kill the process
+      const gone = new Promise((r) => { dropPad = r; pad.on("error", (e) => { log("pad error:", e.message); r(); }); pad.on("close", r); });
       const st = await pad.status();
       const km = await pad.readKeymap().catch(() => null);
       const bl = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight;
@@ -336,9 +370,10 @@ async function run(dir) {
       device = { connected: true, path: info.path, usb: (info.release & 3) === 0, ...st };
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
       pad.on("key", onKey);
-      lastSent = ""; await push(true);
-      await new Promise((r) => { pad.once("error", (e) => { log("pad error:", e.message); r(); }); pad.once("close", r); });
+      lastSent = ""; pushFails = 0; await push(true);
+      await gone;
     } catch (e) { log("connect failed:", e.message); }
+    dropPad = null;
     if (pad) { await pad.close().catch(() => {}); pad = null; }
     device = { connected: false };
     await sleep(2000);
@@ -346,14 +381,12 @@ async function run(dir) {
 }
 
 // ---------------------------------------------------------------- keymap helpers
-/** Rows 1-2 (2+4 keys) become agent keys AG00..AG05; row 3 gets the approve/reject action keys. */
-function agentKeymap(km, actions) {
-  const layer = km.profiles[km.activeProfileId ?? 0].layers[0];
-  const rows = layer.layout.keymap;
-  rows[0] = ["KV_OAI_AG00", "KV_OAI_AG01"];
-  rows[1] = ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"];
-  const pos = { ACT06: [2, 0], ACT07: [2, 1], ACT08: [2, 2], ACT09: [2, 3], ACT10: [3, 0], ACT11: [3, 1], ACT12: [3, 2] };
-  for (const k of Object.values(actions)) { const [r, c] = pos[k]; rows[r][c] = "KV_OAI_" + k; }
+/** Write `layout` over layer 1 of the active profile (everything else in the keymap is left alone). */
+function agentKeymap(km, layout, actions) {
+  const rows = km.profiles[km.activeProfileId ?? 0].layers[0].layout.keymap;
+  if (rows.length !== layout.length || rows.some((r, i) => r.length !== layout[i].length)) throw new Error("layout shape does not match the pad's keymap");
+  for (const k of Object.values(actions)) if (!layout.flat().includes("KV_OAI_" + k)) throw new Error(`actions.${k} is not in layout`);
+  layout.forEach((r, i) => r.forEach((k, j) => { if (k !== null) rows[i][j] = k; })); // null = keep what the pad has (your Input macros survive)
   return km;
 }
 
@@ -384,6 +417,8 @@ async function main(argv) {
   const post = (u, o) => new Promise((ok, no) => { const r = http.request(`http://127.0.0.1:${cfg.port}${u}`, { method: "POST", headers: { "Content-Type": "application/json" } }, (res) => { res.resume(); res.on("end", ok); }); r.on("error", no); r.end(JSON.stringify(o)); });
   switch (cmd) {
     case "run": return run(dir);
+    case "stop": return stopDaemon(dir);
+    case "restart": stopDaemon(dir); await sleep(1500); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
     case "install": case "uninstall": return taskCmd(dir, cmd);
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
     case "demo": {
@@ -407,13 +442,13 @@ async function main(argv) {
         const km = await pad.readKeymap();
         const bak = path.join(dir, `keymap.backup-${Date.now()}.json`);
         fs.writeFileSync(bak, JSON.stringify(km, null, 2));
-        await pad.writeKeymap(agentKeymap(km, cfg.actions));
+        await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
-      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|state|demo"); process.exitCode = 2;
+      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|state|demo"); process.exitCode = 2;
     }
   } finally { await pad.close(); }
 }
 
-module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, EFFECT, DEFAULTS };
+module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

@@ -3,3 +3,6 @@ keymap.before.json
 keymap.backup-*.json
 *.log
 config.json
+*.pid
+*.vbs
+keymap.after*.json
