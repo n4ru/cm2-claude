@@ -395,9 +395,14 @@ async function run(dir) {
       const gone = new Promise((r) => { dropPad = r; pad.on("error", (e) => { log("pad error:", e.message); r(); }); pad.on("close", r); });
       const st = await pad.status();
       const km = await pad.readKeymap().catch(() => null);
+      // thstatus only lights keys the keymap declares as agent keys. If they are gone (the Work Louder Input
+      // app rewrites the keymap from its own profile), every lighting call still ACKs and renders nothing.
+      const active = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[(st.layer_index || 1) - 1];
+      const agentKeys = (active?.layout?.keymap || []).flat().filter((k) => /^KV_OAI_AG/.test(k || "")).length;
+      if (km && !agentKeys) log("WARNING: no agent keys on the active layer — lighting will do nothing. Close the Work Louder Input app and run `cm2d setup-keys`.");
       const bl = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight;
       keysZone = zone(cfg.keys === "keymap" ? bl : cfg.keys === "off" ? null : cfg.keys, 0xffffff, cfg.brightness);
-      device = { connected: true, path: info.path, usb: (info.release & 3) === 0, ...st };
+      device = { connected: true, path: info.path, usb: (info.release & 3) === 0, agentKeys, ...st };
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
       pad.on("key", onKey);
       lastSent = ""; pushFails = 0; await push(true);
