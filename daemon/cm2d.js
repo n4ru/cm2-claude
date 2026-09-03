@@ -81,9 +81,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pidfile = (dir) => path.join(dir, "cm2d.pid");
 const readPid = (dir) => { try { return parseInt(fs.readFileSync(pidfile(dir), "utf8"), 10) || 0; } catch { return 0; } };
 const alive = (pid) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+/** True only if `pid` is a node process running this file — a stale pidfile after a crash may point at a reused pid. */
+function isCm2d(pid) {
+  try {
+    const cmd = process.platform === "win32"
+      ? execFileSync("powershell", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { encoding: "utf8" })
+      : fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    return cmd.includes("cm2d.js");
+  } catch { return false; }
+}
 function stopDaemon(dir) {
   const pid = readPid(dir);
-  if (alive(pid) && pid !== process.pid) { try { process.kill(pid); } catch { /* already gone */ } log(`stopped cm2d pid ${pid}`); }
+  if (alive(pid) && pid !== process.pid && isCm2d(pid)) { try { process.kill(pid); } catch { /* already gone */ } log(`stopped cm2d pid ${pid}`); }
   else log("no running cm2d");
   try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ }
 }
@@ -275,7 +284,7 @@ function zone(z, fallbackColor, fallbackBrightness) {
 async function run(dir) {
   const cfg = loadConfig(dir);
   const prev = readPid(dir);
-  if (alive(prev) && prev !== process.pid) { log(`another cm2d (pid ${prev}) is running; stopping it`); try { process.kill(prev); } catch { /* gone */ } await sleep(1500); }
+  if (alive(prev) && prev !== process.pid && isCm2d(prev)) { log(`another cm2d (pid ${prev}) is running; stopping it`); try { process.kill(prev); } catch { /* gone */ } await sleep(1500); }
   fs.writeFileSync(pidfile(dir), String(process.pid));
   const engine = new Engine(cfg);
   const holds = new Map(); // session id -> respond(decision|null)
@@ -450,5 +459,5 @@ async function main(argv) {
   } finally { await pad.close(); }
 }
 
-module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, EFFECT, DEFAULTS };
+module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

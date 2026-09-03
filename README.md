@@ -55,7 +55,11 @@ ssh desktop "cd C:\Users\user\cm2-claude\daemon && npm install --omit=dev"
 ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js status"        # round trip over BLE/USB
 ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js setup-keys"    # rows 1-2 -> agent keys, row 3 -> APPR/REJ (backs up first)
 ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js install"       # logon task, starts now; `uninstall` reverts
+ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js restart"       # after editing config.json or copying a new cm2d.js
 ```
+
+The daemon keeps a pidfile, so starting a new instance (the task, or `restart`)
+retires the old one instead of racing it for the port.
 
 On every machine that runs Claude Code (rpc and the desktop's WSL are done):
 
@@ -68,9 +72,6 @@ does not reach the daemon.
 
 Check: `node cm2d.js state` (or `curl http://desktop:7777/state`), `node cm2d.js demo`
 walks six fake sessions through every colour, `type cm2d.log` on the desktop.
-After changing config or code, `node cm2d.js restart` retires the running daemon
-(via its pidfile) and relaunches the autostart task, so no stale instance is left
-holding the LEDs.
 
 ## Keycaps (WRK MX Icon set + clear caps)
 

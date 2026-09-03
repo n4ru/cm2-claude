@@ -85,4 +85,6 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   const d = fs.mkdtempSync(p.join(os.tmpdir(), "cm2d-")); assert.equal(readPid(d), 0);
   fs.writeFileSync(p.join(d, "cm2d.pid"), "2147480000"); assert.equal(alive(readPid(d)), false); // a pid that will not exist
   fs.writeFileSync(p.join(d, "cm2d.pid"), String(process.pid)); assert.equal(alive(readPid(d)), true); }
+// pid guard: our own pid is a cm2d process (test.js requires cm2d.js, so the cmdline says test.js — make the check honest)
+{ const { isCm2d, alive } = require("./cm2d.js"); assert.equal(alive(process.pid), true); assert.equal(alive(999999), false); assert.equal(typeof isCm2d(process.pid), "boolean"); }
 console.log("ok");
