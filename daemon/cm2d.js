@@ -338,7 +338,7 @@ async function run(dir) {
     try {
       await pad.writeKeymap(agentKeymap(km, cfg.layout.map((r) => r.map((k) => (/^KV_OAI_/.test(k || "") ? k : null))), cfg.actions));
       n = cfg.layout.flat().filter((k) => /^KV_OAI_AG/.test(k || "")).length;
-      log(`agent keys were missing from the pad's keymap (Input app?) — restored ${n}`);
+      log(`agent keys were missing from the pad keymap (Input app?) - restored ${n}`);
       lastSent = "";
     } catch (e) { log("could not restore agent keys:", e.message); }
     return n;
