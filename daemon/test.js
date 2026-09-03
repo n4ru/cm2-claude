@@ -70,6 +70,11 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   const out = agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions).profiles[0].layers[0].layout;
   assert.deepEqual(out.keymap, [["KV_OAI_AG00", "KV_OAI_AG01"], ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"], ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"], ["KC_NONE", "KC_NONE", "KC_NONE"]]);
   assert.deepEqual(out.encoders, [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]);              // dial untouched
+  // repair layout = only the KV_OAI_* positions; every other key on the layer is left alone
+  const repair = DEFAULTS.layout.map((r) => r.map((k) => (/^KV_OAI_/.test(k) ? k : null)));
+  const km2 = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KM_7", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]] } }] }] }; // stock pad + a user macro on row 3
+  const fixed = agentKeymap(km2, repair, DEFAULTS.actions).profiles[0].layers[0].layout.keymap;
+  assert.deepEqual(fixed[0], ["KV_OAI_AG00", "KV_OAI_AG01"]); assert.equal(fixed[2][0], "KM_7"); assert.equal(fixed[3][1], "KC_L");
   const keep = JSON.parse(JSON.stringify(DEFAULTS.layout)); keep[3][0] = null;
   assert.equal(agentKeymap(km, keep, DEFAULTS.actions).profiles[0].layers[0].layout.keymap[3][0], "KC_NONE"); // null keeps the pad's key
   assert.throws(() => agentKeymap(km, [["KC_A"]], DEFAULTS.actions), /shape/);       // wrong pad

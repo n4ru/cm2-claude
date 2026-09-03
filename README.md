@@ -111,9 +111,21 @@ explicit `{effect,color,brightness}`), `actions` (which ACT keys are approve/rej
 
 * Agent keys and APPR/REJ stop typing; they only report to cm2d. `setup-keys`
   saves the previous keymap next to the daemon first; `node cm2d.js restore
-  <backup>` puts it back. The Input app knows the `KV_OAI_*`
-  keycodes (its ChatGPT preset uses the same ones) but editing that layer there
-  may still rewrite them.
+  <backup>` puts it back.
+* **The Work Louder Input app is not needed and will break this while it runs.**
+  It syncs its own stored profile onto the pad, which replaces the agent keycodes
+  with plain letters; after that every lighting command is still acknowledged
+  with `{ok:1}` and renders nothing (the ring and backlight keep working, the
+  per-key status dies silently). cm2d checks the active layer on connect and every
+  two minutes, reports `agentKeys` in `/state`, and puts the `KV_OAI_*` keys back
+  by itself, but only while Input is not running. Keep Input closed; open it for
+  firmware updates and close it again. It relaunches at login through the
+  `input` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  (`"C:\Users\user\AppData\Local\Programs\input\input.exe" --autostart`);
+  remove that value to stop it.
+* `node cm2d.js stop && node probe.js` drives the pad directly with a bright
+  test pattern and prints every firmware reply. An acknowledgement proves the
+  command was accepted, not that anything lit; only eyes on the pad settle that.
 * Lighting sent over `v.oai.*` is volatile: the pad reverts to its stored
   lighting on power-cycle or layer change, so cm2d re-sends every 30 s.
 * The pad has no way to focus a session in the Claude desktop app, so an agent

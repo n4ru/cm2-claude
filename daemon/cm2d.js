@@ -107,6 +107,7 @@ function normalizeEvent(ev) {
   if (ev.session_id !== undefined && ev.session_id !== null) ev.session_id = String(ev.session_id);
   return ev;
 }
+const inputAppRunning = () => { try { return process.platform === "win32" && execFileSync("tasklist", ["/FI", "IMAGENAME eq input.exe", "/NH"], { encoding: "utf8" }).includes("input.exe"); } catch { return false; } };
 const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
 
 // ---------------------------------------------------------------- framing
@@ -325,6 +326,24 @@ async function run(dir) {
   }
   const schedule = (force) => { clearTimeout(pushTimer); pushTimer = setTimeout(() => push(force), 80); };
 
+  // thstatus only lights keys the keymap declares as agent keys. The Work Louder Input app syncs its own profile
+  // onto the pad and strips them, after which every lighting call still ACKs and renders nothing. So: count them,
+  // and put just the KV_OAI_* keys back when they are missing — unless Input is running, in which case a write
+  // would only start a war with it. Other keys on the layer are left exactly as they are.
+  async function checkAgentKeys(km, st) {
+    const active = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[(st?.layer_index || 1) - 1];
+    let n = (active?.layout?.keymap || []).flat().filter((k) => /^KV_OAI_AG/.test(k || "")).length;
+    if (!km || n) return n;
+    if (inputAppRunning()) { log("WARNING: no agent keys on the active layer and the Input app is running (it rewrites the keymap). Close it; the daemon will restore the keys."); return 0; }
+    try {
+      await pad.writeKeymap(agentKeymap(km, cfg.layout.map((r) => r.map((k) => (/^KV_OAI_/.test(k || "") ? k : null))), cfg.actions));
+      n = cfg.layout.flat().filter((k) => /^KV_OAI_AG/.test(k || "")).length;
+      log(`agent keys were missing from the pad's keymap (Input app?) — restored ${n}`);
+      lastSent = "";
+    } catch (e) { log("could not restore agent keys:", e.message); }
+    return n;
+  }
+
   function answer(which) {
     // APPR/REJ target: the selected session's pending prompt; else the only pending one; several and none selected = ambiguous
     const ids = [...holds.keys()];
@@ -375,7 +394,12 @@ async function run(dir) {
   server.on("error", (e) => { log("http:", e.message); process.exit(1); });
   server.listen(cfg.port, cfg.bind, () => log(`listening on ${cfg.bind}:${cfg.port}`));
 
-  setInterval(() => { if (engine.sweep()) schedule(); push(true); }, cfg.resyncMs);
+  let tick = 0;
+  setInterval(async () => {
+    if (engine.sweep()) schedule();
+    if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); device.agentKeys = await checkAgentKeys(await pad.readKeymap(), st); Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
+    push(true);
+  }, cfg.resyncMs);
 
   const stop = async () => {
     log("shutting down");
@@ -395,11 +419,7 @@ async function run(dir) {
       const gone = new Promise((r) => { dropPad = r; pad.on("error", (e) => { log("pad error:", e.message); r(); }); pad.on("close", r); });
       const st = await pad.status();
       const km = await pad.readKeymap().catch(() => null);
-      // thstatus only lights keys the keymap declares as agent keys. If they are gone (the Work Louder Input
-      // app rewrites the keymap from its own profile), every lighting call still ACKs and renders nothing.
-      const active = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[(st.layer_index || 1) - 1];
-      const agentKeys = (active?.layout?.keymap || []).flat().filter((k) => /^KV_OAI_AG/.test(k || "")).length;
-      if (km && !agentKeys) log("WARNING: no agent keys on the active layer — lighting will do nothing. Close the Work Louder Input app and run `cm2d setup-keys`.");
+      const agentKeys = await checkAgentKeys(km, st);
       const bl = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight;
       keysZone = zone(cfg.keys === "keymap" ? bl : cfg.keys === "off" ? null : cfg.keys, 0xffffff, cfg.brightness);
       device = { connected: true, path: info.path, usb: (info.release & 3) === 0, agentKeys, ...st };
