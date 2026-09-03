@@ -1,0 +1,12 @@
+{
+  "name": "cm2-claude-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code agent-status lights and approve/reject keys for the Work Louder Creator Micro 2",
+  "main": "cm2d.js",
+  "bin": { "cm2d": "cm2d.js" },
+  "scripts": { "test": "node test.js", "start": "node cm2d.js run" },
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "dependencies": { "node-hid": "^3.4.0" }
+}

@@ -1,0 +1,5 @@
+node_modules/
+keymap.before.json
+keymap.backup-*.json
+*.log
+config.json
