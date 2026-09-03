@@ -486,5 +486,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
