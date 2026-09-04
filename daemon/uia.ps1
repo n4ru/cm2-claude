@@ -23,14 +23,18 @@ if($mode -eq "opensidebar"){ if(OpenSidebar){"OPENED"}else{"ALREADY_OPEN"}; exit
 if($mode -eq "select"){
   if(-not $target){"NO_TARGET";exit 2}
   OpenSidebar | Out-Null
-  # sidebar session buttons are named "<status> <title>" e.g. "Running Inkboy project setup"; the row menu is "More options for <title>"
+  # sidebar session buttons are named "<status> <title>" e.g. "Running Inkboy project setup"; the row menu is "More options for <title>".
+  # Collect rows ending with the title, then prefer one whose prefix (the bit before " <title>") is a single status word,
+  # so target "project setup" does NOT grab "Running Inkboy project setup" (prefix "Running Inkboy" has a space).
   $btnCond=New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::Button)
+  $cands=@()
   foreach($b in $win.FindAll($TS::Descendants,$btnCond)){
     $n=$b.Current.Name
-    if($n -and $n.EndsWith(" "+$target) -and -not $n.StartsWith("More options for") -and -not $n.EndsWith(", rename session")){
-      $r=InvokeEl $b; if($r){"$r [$n]"; exit 0}
-    }
+    if($n -and $n.EndsWith(" "+$target) -and -not $n.StartsWith("More options for") -and -not $n.EndsWith(", rename session")){ $cands += $b }
   }
+  $best = $cands | Where-Object { $_.Current.Name.Substring(0, $_.Current.Name.Length - $target.Length - 1) -notmatch " " } | Select-Object -First 1
+  if(-not $best){ $best = $cands | Select-Object -First 1 }
+  if($best){ $r=InvokeEl $best; if($r){"$r [$($best.Current.Name)]"; exit 0} }
   "NOTFOUND"; exit 3
 }
 if($mode -eq "current"){

@@ -9,7 +9,16 @@
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/cm2-claude"
 [ -z "$CM2_NO_DAEMON" ] || exit 0                                            # opt out
 u="${CM2_URL:-$(cat "$cfg/url" 2>/dev/null)}"; u="${u:-http://127.0.0.1:7777}"
-curl -s -m 2 "$u/state" 2>/dev/null | grep -q '"connected":true' && exit 0  # a daemon with the pad is already answering
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+if curl -s -m 3 "$u/state" 2>/dev/null | grep -q '"connected":true'; then                    # a daemon with the pad is already answering
+  # Codex plays its onboarding when the app first detects the pad; we play it once per plugin version, so installing or
+  # updating the plugin welcomes you on the pad. The daemon dedupes ?v across machines; the local flag avoids re-POSTing.
+  ver="$(sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+  if [ -n "$ver" ] && [ "$(cat "$cfg/welcomed" 2>/dev/null)" != "$ver" ]; then
+    curl -s -m 3 -X POST -o /dev/null "$u/onboard?v=$ver" 2>/dev/null && printf %s "$ver" > "$cfg/welcomed"
+  fi
+  exit 0
+fi
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"

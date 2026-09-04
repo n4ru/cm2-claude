@@ -688,8 +688,9 @@ async function run(dir) {
     if (dialActive() && slot === 0) { sendKeys([VK.esc]); log("AG00 while navigating -> Escape"); return; }
     const now = Date.now();
     if (lastTap && lastTap.slot === slot && now - lastTap.at <= cfg.doubleTapMs) {  // Codex: two taps = switch to it AND bring the window forward
-      lastTap = null; engine.press(slot);
-      const s2 = engine.selected && engine.sessions.get(engine.selected), d2 = s2 && desktopSession(s2.id);
+      lastTap = null;
+      const s2 = engine.bySlot(slot); if (s2) engine.selected = s2.id;   // select it (breathe); do NOT re-press, which would toggle it off
+      const d2 = s2 && desktopSession(s2.id);
       if (d2 && d2.title) jumpToSession(d2.title);
       raiseClaude(); log(`key AG0${slot} double tap -> switch + raise`); schedule(); return;
     }
@@ -750,7 +751,12 @@ async function run(dir) {
         return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
-      if (req.method === "POST" && req.url === "/onboard") { onboard(); return respond(res); } // benign: plays the welcome animation
+      if (req.method === "POST" && req.url.startsWith("/onboard")) {                             // benign: plays the welcome animation
+        const v = new URL(req.url, "http://x").searchParams.get("v");                             // ?v=<plugin version> plays once per version per pad
+        if (v) { const wf = path.join(dir, "welcomed.v"); let prev = ""; try { prev = fs.readFileSync(wf, "utf8").trim(); } catch { /* none */ }
+          if (prev === v) return respond(res, { ok: true, skipped: true }); try { fs.writeFileSync(wf, v); } catch { /* fine */ } }
+        onboard(); return respond(res, { ok: true });
+      }
       if (req.method === "GET" && req.url.startsWith("/uia")) {   // diagnostic/feature: read or click the app's accessibility tree
         if (!loopback(req)) { res.writeHead(403); return res.end(); }
         const q = new URL(req.url, "http://x").searchParams, ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), q.get("mode") || "dump", q.get("target") || ""], { windowsHide: true });
