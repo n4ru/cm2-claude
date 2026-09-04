@@ -121,7 +121,10 @@ claude plugin install cm2-claude@cm2-claude
 ```
 
 That registers the hooks and a `/cm2` command that shows what the pad is
-displaying. The hook script posts to `CM2_URL` if set in your environment,
+displaying. The marketplace is cloned from GitHub, so the machine needs to be
+able to clone this repository (it is private: `gh auth login`, or an SSH key on
+the account). Where that is not possible, `hooks/install-hooks.sh` does the
+same job by writing the hooks into `~/.claude/settings.json` directly. The hook script posts to `CM2_URL` if set in your environment,
 otherwise to the desktop's Tailscale address. If you installed the hooks the old
 way with `hooks/install-hooks.sh`, run it again with `--remove` so events are
 not sent twice. The daemon itself is not a plugin: something has to own the
