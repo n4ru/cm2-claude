@@ -112,11 +112,21 @@ ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js restart"       #
 The daemon keeps a pidfile, so starting a new instance (the task, or `restart`)
 retires the old one instead of racing it for the port.
 
-On every machine that runs Claude Code (rpc and the desktop's WSL are done):
+On every machine that runs Claude Code, install the hook side as a plugin (this
+repo is also a Claude Code marketplace):
 
 ```bash
-CM2_URL=http://100.124.22.74:7777 hooks/install-hooks.sh     # merges into ~/.claude/settings.json; --remove takes it out
+claude plugin marketplace add n4ru/cm2-claude
+claude plugin install cm2-claude@cm2-claude
 ```
+
+That registers the hooks and a `/cm2` command that shows what the pad is
+displaying. The hook script posts to `CM2_URL` if set in your environment,
+otherwise to the desktop's Tailscale address. If you installed the hooks the old
+way with `hooks/install-hooks.sh`, run it again with `--remove` so events are
+not sent twice. The daemon itself is not a plugin: something has to own the
+pad's Bluetooth connection around the clock, hold permission prompts open and
+reprogram the keymap, and a plugin only lives as long as a session.
 
 From WSL on the desktop use the same Tailscale address; the WSL gateway address
 does not reach the daemon.
