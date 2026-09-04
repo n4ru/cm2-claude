@@ -1,6 +1,6 @@
 {
   "name": "cm2-claude",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Claude Code agent-status lights, pad approve/reject and hold-to-talk on a Work Louder Creator Micro 2. This plugin is the hook side; the cm2d daemon runs on the machine the pad is paired to.",
   "author": { "name": "n4ru", "url": "https://github.com/n4ru/cm2-claude" },
   "homepage": "https://github.com/n4ru/cm2-claude",

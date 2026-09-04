@@ -916,7 +916,7 @@ function startDetached(dir, cfg) {
   const pid = readPid(dir);
   if (alive(pid) && pid !== process.pid && isCm2d(pid)) return log(`cm2d already running (pid ${pid})`);
   if (process.platform === "win32") {
-    try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task */ }
+    try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ } return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task */ }
     return spawn("wscript.exe", [writeLauncher(dir)], { detached: true, stdio: "ignore", windowsHide: true }).unref();
   }
   const out = fs.openSync(path.join(dir, "cm2d.log"), "a");
