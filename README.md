@@ -50,13 +50,24 @@ firmware 0.6 is what put the `v.oai.*` methods on every Creator Micro 2).
 the daemon, and they coexist:
 
 *Started by the plugin.* If Claude Code itself runs on that machine (the desktop
-app's native sessions, or the CLI), the plugin's `SessionStart` hook starts cm2d
-from the plugin's own copy of the daemon whenever a session starts and it isn't
-already running (first run does the `npm install`). Nothing else to set up. Set
-`CM2_NO_DAEMON=1` to opt out.
+app's native sessions, or the CLI), the plugin's `SessionStart` hook takes care
+of it: the first time, it does the `npm install` in the plugin's own copy of the
+daemon and registers the `cm2d` logon task (user-level, no admin), which starts
+the daemon now and at every login; after that it just runs the task whenever a
+session starts and the daemon isn't answering. Nothing else to set up.
+`CM2_NO_DAEMON=1` opts out entirely; `CM2_NO_AUTOSTART=1` skips the task and
+starts the daemon detached from the session instead.
 
-*Started at login.* If your sessions run elsewhere (SSH, WSL) and the pad's
-machine only hosts the daemon, install it as a logon task:
+The task matters: the daemon injects keystrokes (dial, mic, typed answers), so
+it has to live in the interactive Windows session, and a process started from
+an SSH session cannot. That is also why a session running *elsewhere* can only
+revive the daemon through the task: put the pad machine's SSH host name in
+`~/.config/cm2-claude/ssh` (one line, e.g. `desktop`) on the machine your
+sessions run on, and the hook there runs `schtasks /Run /TN cm2d` over SSH when
+the daemon doesn't answer.
+
+*Started at login, by hand.* If Claude Code never runs on the pad's machine,
+install the same task yourself from a checkout:
 
 ```bash
 scp -r daemon desktop:C:/Users/user/cm2-claude/

@@ -441,6 +441,7 @@ async function run(dir) {
   const cfg = loadConfig(dir);
   if (await stopDaemon(dir, cfg.port)) await sleep(500);
   fs.writeFileSync(pidfile(dir), String(process.pid));
+  if (process.platform === "win32") { try { writeLauncher(dir); } catch { /* read-only code dir */ } } // keep the launchers pointing at this copy
   process.on("uncaughtException", (e) => log("crash guard:", e.stack || e)); // one bad request or odd key event must not end a weeks-long run
   const engine = new Engine(cfg);
   const stateFile = path.join(dir, "sessions.json");   // survives restarts; the 12 h sweep still applies on load
@@ -743,13 +744,17 @@ function agentKeymap(km, layout, actions, extras = {}) {
  *  `cmd /c "..."` strips the first and last quote it sees, which would otherwise break the quoted node path. */
 function writeLauncher(dir, vbs = path.join(__dirname, "cm2d.vbs")) {   // next to the code; the log goes to the state folder
   const cmd = `cmd /c ""${process.execPath}" "${__filename}" run >> "${path.join(dir, "cm2d.log")}" 2>&1"`;
-  fs.writeFileSync(vbs, `CreateObject("WScript.Shell").Run "${cmd.replace(/"/g, '""')}", 0, False\r\n`);
+  const text = `CreateObject("WScript.Shell").Run "${cmd.replace(/"/g, '""')}", 0, False\r\n`;
+  fs.writeFileSync(vbs, text);
+  // a second copy at a FIXED path (%APPDATA%\cm2-claude\cm2d.vbs), so another machine can start this daemon over ssh
+  // without knowing which copy of the code (plugin cache, checkout) it lives in: ssh desktop 'wscript "%APPDATA%\cm2-claude\cm2d.vbs"'
+  const fixed = path.join(dir, "cm2d.vbs"); if (fixed !== vbs) { try { fs.writeFileSync(fixed, text); } catch { /* fine */ } }
   return vbs;
 }
 function taskCmd(dir, action) {
   if (action === "install") {
-    const vbs = writeLauncher(dir);
-    execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", `wscript.exe "${vbs}"`], { stdio: "inherit" });
+    writeLauncher(dir);   // the task runs the FIXED copy (%APPDATA%\cm2-claude\cm2d.vbs), so a plugin update never strands it
+    execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", `wscript.exe "${path.join(dir, "cm2d.vbs")}"`], { stdio: "inherit" });
     execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
   } else {
     try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ }
