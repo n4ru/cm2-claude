@@ -185,18 +185,22 @@ row 4   [mic]         [ .. ]       [ .. ]                       mic = TALK: hold
 ```
 
 - **Agent key**: selects that session (its key breathes, the other keys flash
-  its colour for four seconds) and acknowledges green/red back to white. It also
-  asks the Claude desktop app to open that session through its
-  `claude://code/continue` deep link; that entry point is behind a server-side
-  feature flag in current builds, so it is inert until the flag flips.
+  its colour for four seconds) and acknowledges green/red back to white, and
+  switches the desktop app to that session **in the background** (no focus
+  steal). Double-tap within `doubleTapMs` switches and also raises the window.
+  The current app has no deep link that opens a local or SSH session, so the
+  daemon does it the way a screen reader would: `daemon/uia.ps1` opens the
+  sidebar if needed and clicks that session's row through Windows UI Automation
+  (Invoke) by its title. One bounded action, never a loop.
 - **APPR / REJ**: answer the held permission prompt of the selected session, else
   the only pending one; with several pending and none selected they do nothing
   but log, so press the amber session's key first.
 - **TALK**: see [Hold-to-talk](#hold-to-talk).
 - **Esc** on row 3 left, and the spare keys are inert, so the pad never types
-  stray letters. The dial is volume; the joystick pages up/down and sends Esc
-  (left) or Enter (right). All of it is in `layout`, `encoders` and `joystick`
-  in the config and editable in the configurator.
+  stray letters. The dial and joystick are vendor keys the daemon reads and acts
+  on (dial navigates, stick cycles sessions), so they do nothing on their own
+  when the daemon isn't running. All of it is in `layout`, `encoders` and
+  `joystick` in the config and editable in the configurator.
 
 `setup-keys` writes layer 1 from the config. A cell is a plain keycode
 (`"KC_ESC"`), a chord written to the pad as a macro (`["KC_LGUI","KC_H"]`:
@@ -207,15 +211,18 @@ time; macros you built elsewhere are left alone.
 ## The Codex behaviours
 
 Everything the ChatGPT app does with the Codex Micro (from the freemicro
-project's teardown of that app) is reproduced, minus its onboarding animation and
-mini-game. All of it is on by default and switchable in the configurator.
+project's teardown of that app) is reproduced, minus its mini-game. All of it is
+on by default and switchable in the configurator. The pad also plays a one-time
+welcome animation on first connect (`cm2d onboard` replays it); the Codex Micro
+plays one too, though its exact frames aren't public, so this one is our own.
 
 | Codex | here |
 |---|---|
 | **Dial** turns move the highlight (Arrow Up / Down), click is Enter, hold 500 ms opens settings; using it puts the pad in "navigating": blue snake ring, and AG00 turns red and acts as Escape | `dial: "navigate"`: identical, hold opens this configurator; "navigating" lasts 2 s after the last dial event (Codex knows when a menu is open; we don't). `dial: "keymap"` restores plain keycodes from `encoders` |
 | **Stick** fires one command per push past half deflection, re-arms at rest; up plan mode, down sidebar, left back, right forward | `stick.mode: "vendor"` with the same deadzones and edge trigger; each direction is a chord of virtual-key codes. Defaults are the Claude desktop app's documented Code-tab shortcuts: **left/right cycle to the previous/next session in the sidebar** (Ctrl+Shift+Tab / Ctrl+Tab — this is how you switch sessions from the pad today), up cycles the transcript view modes (Ctrl+O), down toggles the terminal pane (Ctrl+`). `"keymap"` restores `joystick` |
 | **Agent keys** show the six most recently updated threads, most recent first | `agentSource: "recent"` (keys re-sort as sessions become active) or `"sticky"` (a session keeps its key) |
-| single tap opens the thread in the background, double tap within 350 ms also raises the window | tap selects and acknowledges (and fires the gated deep link); double tap within `doubleTapMs` raises the Claude window |
+| single tap opens the thread in the background, double tap within 350 ms also raises the window | `focusOnPress`: a tap switches the desktop to that session in the background via UI Automation (no deep link exists for local sessions); double tap within `doubleTapMs` switches and raises the window |
+| the breathing key follows whichever thread is on screen | `followDesktop`: a second read-only PowerShell reports the app's current session (the toolbar's "…, rename session" button) every ~2 s, so the breathing key tracks manual clicks and Ctrl+Tab, not just pad presses |
 | the selected thread's green clears when the window is focused | `focusDowngrade`: the daemon polls the foreground window; when it is Claude, the selected session's green turns white |
 | ring: only the selected thread working (blue snake), a 4 s flash on selection change, voice states | `ambientMode: "codex"` does exactly that; `"urgent"` (default) shows the most urgent state of any session instead. Recording = green snake either way |
 | key backlight off; brightness 0–100 | `keys: "off"`, `brightness` |
@@ -287,7 +294,7 @@ talk), `talkKeys`/`talkMode`, `focusOnPress`, `flashMs`, `layout`, `encoders`,
 `joystick`, `lights` (what `setup-keys` writes: the 13 keys, the dial, the
 joystick and the pad's own stored lighting; null keeps what the pad has),
 `dial`, `stick`, `actionKeys`, `autoDimMs`, `agentSource`, `doubleTapMs`,
-`focusDowngrade`, `ambientMode` (the [Codex behaviours](#the-codex-behaviours)),
+`focusDowngrade`, `ambientMode`, `followDesktop` (the [Codex behaviours](#the-codex-behaviours)),
 `peers` (other daemons to announce to and look for, besides the Tailscale peers;
 see [Many machines, one pad](#install)).
 

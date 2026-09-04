@@ -551,6 +551,26 @@ async function run(dir) {
     if (dimmed) { dimmed = false; lastSent = ""; log("auto-dim: wake"); schedule(true); }
   }
   const OFF = { e: 0, b: 0, s: 0, m: 0, c: 0 };
+  // Onboarding: a one-time welcome light show (the Codex Micro plays one on first setup; its exact frames aren't public,
+  // so this is our own in the same spirit). Wakes the agent keys, teaches the status palette, sweeps the ring, settles.
+  let onboarding = false;
+  async function onboard() {
+    if (!pad || onboarding) return;
+    onboarding = true;
+    const B = cfg.brightness, C = cfg.colors, TERRA = 0xd97757; // Claude's terracotta accent
+    const th = (cols) => cols.map((c, i) => ({ id: i, c: c || 0, b: c ? B : 0, e: c ? 1 : 0, s: 0, sk: 0, sa: 0 }));
+    const z = (e, c, sp = 0) => ({ e, b: B, s: sp, m: 0, c });
+    try {
+      log("onboarding: welcome animation");
+      await pad.setZones(OFF, OFF);
+      for (let i = 0; i < SLOTS; i++) { await pad.setThreads(th(Array.from({ length: SLOTS }, (_, j) => (j <= i ? C.idle : 0)))); await sleep(85); }
+      for (const col of [C.working, C.awaiting, C.unread, C.error]) { await pad.setThreads(th(Array(SLOTS).fill(col))); await sleep(260); }
+      await pad.setThreads(th(Array(SLOTS).fill(C.idle)));
+      await pad.setZones(z(EFFECT.rainbow, 0, 0.6), OFF); await sleep(1100);
+      await pad.setZones(z(EFFECT.breath, TERRA, 0.5), OFF); await sleep(900);
+    } catch (e) { log("onboard:", e.message); }
+    finally { onboarding = false; lastSent = ""; if (pad) await push(true); }
+  }
 
   // ---- many daemons, one pad (see the comment above announcedUrl)
   let host = null, finding = false;   // base URL of the daemon that has the pad, when it is not this one
@@ -587,7 +607,7 @@ async function run(dir) {
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
 
   async function push(force) {
-    if (!pad || dimmed) return;
+    if (!pad || dimmed || onboarding) return;
     if (cfg.focusDowngrade && claudeFocused) engine.downgradeSelected();
     const { threads, top } = engine.render();
     if (flash && flash.until <= Date.now()) flash = null;
@@ -667,7 +687,12 @@ async function run(dir) {
   function agentKey(slot) {
     if (dialActive() && slot === 0) { sendKeys([VK.esc]); log("AG00 while navigating -> Escape"); return; }
     const now = Date.now();
-    if (lastTap && lastTap.slot === slot && now - lastTap.at <= cfg.doubleTapMs) { lastTap = null; raiseClaude(); log(`key AG0${slot} double tap -> raise Claude`); return; }
+    if (lastTap && lastTap.slot === slot && now - lastTap.at <= cfg.doubleTapMs) {  // Codex: two taps = switch to it AND bring the window forward
+      lastTap = null; engine.press(slot);
+      const s2 = engine.selected && engine.sessions.get(engine.selected), d2 = s2 && desktopSession(s2.id);
+      if (d2 && d2.title) jumpToSession(d2.title);
+      raiseClaude(); log(`key AG0${slot} double tap -> switch + raise`); schedule(); return;
+    }
     lastTap = { slot, at: now };
     const before = engine.selected;
     engine.press(slot);
@@ -725,6 +750,7 @@ async function run(dir) {
         return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
+      if (req.method === "POST" && req.url === "/onboard") { if (!loopback(req)) { res.writeHead(403); return res.end(); } onboard(); return respond(res); }
       if (req.method === "GET" && req.url.startsWith("/uia")) {   // diagnostic/feature: read or click the app's accessibility tree
         if (!loopback(req)) { res.writeHead(403); return res.end(); }
         const q = new URL(req.url, "http://x").searchParams, ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), q.get("mode") || "dump", q.get("target") || ""], { windowsHide: true });
@@ -835,6 +861,7 @@ async function run(dir) {
       pad.on("key", onKey); pad.on("joystick", stick);
       lastSent = ""; pushFails = 0; await push(true);
       host = null; announce(true);
+      if (!fs.existsSync(path.join(dir, "onboarded"))) { try { fs.writeFileSync(path.join(dir, "onboarded"), new Date().toISOString()); } catch { /* fine */ } onboard(); } // first run: welcome once
       await gone;
     } catch (e) { log("connect failed:", e.message); }
     dropPad = null;
@@ -921,6 +948,7 @@ async function main(argv) {
     case "stick": return post("/key", { joystick: { a: +argv[1], d: argv[2] === undefined ? 1 : +argv[2] } });
     case "install": case "uninstall": return taskCmd(dir, cmd);
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
+    case "onboard": return post("/onboard", {});
     case "demo": {
       const ids = Array.from({ length: SLOTS }, (_, i) => `demo-${i}-${"x".repeat(30)}`);
       const steps = [["SessionStart"], ["UserPromptSubmit"], ["PermissionRequest"], ["Stop"], ["StopFailure"], ["SessionEnd"]];
