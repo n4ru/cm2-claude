@@ -21,8 +21,10 @@
  *   node cm2d.js setup-keys   turn rows 1-2 into agent keys, row 3 into APPR/REJ
  *   node cm2d.js install      autostart at logon (Windows scheduled task) + start now
  *   node cm2d.js uninstall
- *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
+ *   node cm2d.js start | stop | restart   start detached (the logon task on Windows) / stop / relaunch
  * State lives in %APPDATA%\cm2-claude (Windows) or ~/.config/cm2-claude; CM2_HOME overrides.
+ * Many machines, one pad: every machine with the plugin runs this daemon. The one whose pad is connected is the host;
+ * the others are relays that forward their hooks to it (see "many daemons, one pad" below).
  *   node cm2d.js press AG00 [act]   simulate a pad key press (act 1) or release (act 0); loopback only
  *   node cm2d.js stick 0.75 [d]     simulate a stick push at angle (turns, 0 = right) and distance
  *   node cm2d.js state        what the running daemon thinks
@@ -61,7 +63,8 @@ const DEFAULTS = {
   // "toggle" taps the chord on press and again on release (Windows voice typing, Win+H: opens, then closes).
   // "hold" presses the chord down on press and lifts it on release (a push-to-talk hotkey such as Claude's dictation shortcut).
   talkKeys: [0x5b, 0x48], talkMode: "toggle",
-  focusOnPress: true,   // agent key press opens that session in the Claude desktop app (claude://code/continue deep link)
+  focusOnPress: true,   // agent key press brings the Claude desktop app to the front (raise), and fires the
+                        // claude://code/continue deep link to open that exact session (inert until Anthropic ungates it)
   flashMs: 4000,        // after a selection change the other keys flash the selected session's colour, as Codex does
   // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
   // a plain keycode types that key, an ARRAY is a chord written as an on-pad macro (modifiers held, last key
@@ -80,14 +83,18 @@ const DEFAULTS = {
   // ---- the Codex Micro behaviours (from the ChatGPT app's own layout), all on by default
   dial: "navigate",     // "navigate": turn = previous / next option (Arrow Up / Down), click = Enter, hold 500 ms = open the configurator;
                         // using the dial puts the pad in "navigating" for 2 s: blue snake ring, AG00 red and acting as Escape. "keymap" = `encoders`
-  stick: { mode: "vendor", up: [0x10, 0x09], down: [0x11, 0x42], left: [0x12, 0x25], right: [0x12, 0x27] }, // Codex: plan mode, sidebar, back, forward.
-                        // vendor = the daemon reads the stick, fires once per push past half deflection, re-arms at rest. "keymap" = `joystick`
+  // vendor = the daemon reads the stick, fires one shortcut per push past half deflection, re-arms at rest. "keymap" = `joystick`.
+  // Defaults are the Claude desktop app's documented Code-tab shortcuts: left/right cycle sessions in the sidebar
+  // (Ctrl+Shift+Tab / Ctrl+Tab — this is how you jump between sessions from the pad today), up cycles the transcript
+  // view modes (Ctrl+O), down toggles the terminal pane (Ctrl+`). Windows virtual-key codes; edit freely in the GUI.
+  stick: { mode: "vendor", up: [0x11, 0x4f], down: [0x11, 0xc0], left: [0x11, 0x10, 0x09], right: [0x11, 0x09] },
   actionKeys: {},       // more vendor keys handled here, e.g. {"ACT09": {"chord": [17, 78]}, "ACT12": {"text": "Not sure, use your judgment", "enter": true}, "ACT11": {"raise": true}, "ACT06": {"open": "config"}}
   autoDimMs: 180000,    // Codex: lights off after 3 min without a key, stick or status change; anything wakes them. 0 = never
   agentSource: "recent",// Codex: the six most recently active sessions, most recent on AG00. "sticky": a session keeps its key until it ends
   doubleTapMs: 350,     // second tap on the same agent key within this raises the Claude window; also the mic latch window
   focusDowngrade: true, // Codex: the selected session's green (done, unread) turns white while the Claude window is focused
   ambientMode: "urgent",// ring = most urgent state of any session. "codex": only the selected session working (blue snake), else off
+  peers: [],            // other daemons to announce to / look for besides the tailnet peers, e.g. ["http://100.124.22.74:7777"] (a machine Tailscale can't list, such as WSL)
 };
 /** Which encoders / joystick / lights setup-keys writes, honouring the dial and stick modes. The encoder order is the
  *  one the Input app's ChatGPT preset uses (CC, CW, click), so the daemon's mapping matches the Codex feel. */
@@ -104,7 +111,7 @@ function loadConfig(dir) {
 }
 const mergeConfig = (user) => ({ ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions }, stick: { ...DEFAULTS.stick, ...user.stick } });
 
-const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode"];
+const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode"];
 const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions", "dial", "stick"];
 /** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
  *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
@@ -236,9 +243,36 @@ function desktopSession(cliId, dir = SESSIONS_DIR) {
 }
 function openInClaude(localId) {
   if (process.platform !== "win32") return log("openInClaude (no-op off Windows):", localId);
-  spawn("rundll32", ["url.dll,FileProtocolHandler", `claude://code/continue?session=${localId}`], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  openUrl(`claude://code/continue?session=${localId}`);   // Start-Process hands the deep link to the already-running app
 }
 const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
+
+// ---------------------------------------------------------------- many daemons, one pad
+// A HID device is only reachable from the machine it is paired to, so exactly one daemon can drive the pad. Every other
+// machine's plugin still runs this daemon, as a relay: its hooks post to localhost and the relay forwards them to the
+// host, holds included. Finding the host is two-way: the host announces itself (POST /announce {port, pad}) to every
+// online tailnet peer and cfg.peers when the pad connects or drops and once a minute; a relay probes the same peers
+// whenever it has no host. A relay adopts a host only after reading /state from it and seeing a connected pad, so an
+// announcement can point it nowhere else; it drops a host only when forwarding to it fails. The pad moving to another
+// machine (a Bluetooth slot switch) is just the new host announcing.
+const tailscaleBin = () => process.env.CM2_TAILSCALE || (process.platform === "win32" && fs.existsSync("C:\\Program Files\\Tailscale\\tailscale.exe") ? "C:\\Program Files\\Tailscale\\tailscale.exe" : "tailscale");
+/** IPv4 of every online peer in `tailscale status --json` output. */
+const peerIps = (status) => Object.values((status && status.Peer) || {}).filter((p) => p.Online).map((p) => (p.TailscaleIPs || []).find((ip) => ip.includes("."))).filter(Boolean);
+function tailscalePeers() {
+  return new Promise((resolve) => require("child_process").execFile(tailscaleBin(), ["status", "--json"], { encoding: "utf8", timeout: 3000, windowsHide: true, maxBuffer: 8e6 }, (e, out) => {
+    try { resolve(e ? [] : peerIps(JSON.parse(out))); } catch { resolve([]); }
+  }));
+}
+/** The base URL of a daemon that announced itself from `remoteAddress` on `port`. */
+const announcedUrl = (remoteAddress, port) => { const ip = String(remoteAddress || "").replace(/^::ffff:/, ""); return `http://${ip.includes(":") ? "[" + ip + "]" : ip}:${port}`; };
+/** Small JSON HTTP client: resolves {status, body}, rejects on error or timeout. */
+function request(method, url, body, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const r = http.request(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, timeout: timeoutMs }, (res) => { let b = ""; res.on("data", (c) => { b += c; if (b.length > 1e6) res.destroy(); }); res.on("end", () => resolve({ status: res.statusCode, body: b })); res.on("error", reject); });
+    r.on("error", reject); r.on("timeout", () => r.destroy(new Error("timeout")));
+    r.end(body ? JSON.stringify(body) : undefined);
+  });
+}
 
 // ---------------------------------------------------------------- framing
 /** Split one JSON-RPC line into 64-byte output reports: [id 6][channel][len][payload…]. */
@@ -484,6 +518,37 @@ async function run(dir) {
   }
   const OFF = { e: 0, b: 0, s: 0, m: 0, c: 0 };
 
+  // ---- many daemons, one pad (see the comment above announcedUrl)
+  let host = null, finding = false;   // base URL of the daemon that has the pad, when it is not this one
+  let tsCache = { at: 0, ips: [] };   // tailnet peer IPs; spawning tailscale is not free, so cache for 20 s
+  async function tailnetIps() { if (Date.now() - tsCache.at > 20000) tsCache = { at: Date.now(), ips: await tailscalePeers() }; return tsCache.ips; }
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^\[|\]$/g, ""); } catch { return ""; } };
+  const peerUrls = async () => [...new Set([...(await tailnetIps()).map((ip) => `http://${ip}:${cfg.port}`), ...(cfg.peers || [])])];
+  /** Only a machine Tailscale (or cfg.peers) vouches for may become this daemon's host: otherwise anything that can reach
+   *  the open port could announce itself as the pad and answer this machine's permission prompts. Loopback always allowed. */
+  const knownIps = async () => new Set([...(await tailnetIps()), ...(cfg.peers || []).map(hostOf), "127.0.0.1", "::1"]);
+  const isPeer = async (u) => (await knownIps()).has(hostOf(u));
+  /** A real host answers /state with host:"self"; a relay proxies ITS host's /state, which would otherwise look the same
+   *  (device.connected true) — so a relay must never be mistaken for the pad's host. */
+  const probe = async (u) => { try { const r = await request("GET", u + "/state", null, 1500); const j = JSON.parse(r.body); return r.status === 200 && j.host === "self" && !!(j.device && j.device.connected); } catch { return false; } };
+  async function adopt(u, why) { if (pad || host || !(await isPeer(u)) || !(await probe(u))) return; if (pad || host) return; host = u; log(`pad is on ${u} (${why})`); } // re-check after the awaits: no last-write-wins
+  async function findHost() {
+    if (pad || host || finding) return;
+    finding = true;
+    try { for (const u of await peerUrls()) { if (host) break; await adopt(u, "found"); } } finally { finding = false; }  // first real host wins; sequential = no race
+  }
+  const announce = async (on) => Promise.all((await peerUrls()).map((u) => request("POST", u + "/announce", { port: cfg.port, pad: on }, 2000).catch(() => {})));
+  /** Forward a hook to the host and hand its answer back; a hold is proxied for as long as the hook's curl waits. */
+  function relay(req, res, body) {
+    const to = host; let gaveUp = false;
+    const up = http.request(to + "/hook", { method: "POST", headers: { "Content-Type": "application/json", "x-cm2-relayed": "1" }, timeout: (cfg.holdMs || 0) + 10000 }, (r) => { res.writeHead(r.statusCode || 200, { "Content-Type": "application/json" }); r.pipe(res); });
+    up.on("error", (e) => { if (gaveUp) return; log(`relay to ${to} failed: ${e.message}`); if (host === to) { host = null; setTimeout(findHost, 1000); } if (!res.headersSent) respond(res); else res.destroy(); });
+    up.on("timeout", () => up.destroy(new Error("timeout")));
+    res.on("close", () => { gaveUp = true; up.destroy(); });   // the hook gave up (curl timeout): release the host's hold too; not the host's fault
+    up.end(body);
+  }
+  const proxyGet = (u, res) => request("GET", u, null, 3000).then((r) => { let b = r.body; try { b = JSON.stringify({ ...JSON.parse(b), host }); } catch { /* pass it through */ } res.writeHead(r.status || 502, { "Content-Type": "application/json" }); res.end(b); }, (e) => respond(res, { error: `host ${host}: ${e.message}` }, 502));
+
   const respond = (res, obj, status) => { res.writeHead(status || (obj ? 200 : 204), { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
 
@@ -574,9 +639,13 @@ async function run(dir) {
     engine.press(slot);
     const s = engine.selected && engine.sessions.get(engine.selected);
     log(`key AG0${slot} -> select ${s ? s.id.slice(0, 8) : "none"}`);
-    if (s && engine.selected !== before) {
-      if (cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
-      if (cfg.focusOnPress) { const d = desktopSession(s.id); if (d) { openInClaude(d.localId); log(`  opening "${d.title}" in Claude`); } else log("  no desktop session found for it"); }
+    if (s) {
+      if (engine.selected !== before && cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
+      if (cfg.focusOnPress) {                                   // bring the Claude window to the front now; the deep link
+        const d = desktopSession(s.id);                         // navigates to this exact session once Anthropic ungates it
+        if (d) { openInClaude(d.localId); log(`  raising "${d.title}"`); } else log("  no desktop session mapping; raising the window");
+        raiseClaude();
+      }
     }
     schedule();
   }
@@ -618,11 +687,13 @@ async function run(dir) {
     req.on("data", (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on("end", () => {
       if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) {
+        if (!pad && host) { res.writeHead(302, { Location: host + "/" }); return res.end(); }   // the configurator lives where the pad is
         return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
       if (req.method === "GET" && req.url === "/state") {
-        return respond(res, { device, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || ""), title: desktopSession(s.id)?.title })) });
+        if (!pad && host) return proxyGet(host + "/state", res);
+        return respond(res, { device, host: pad ? "self" : host, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || ""), title: desktopSession(s.id)?.title })) });
       }
       let ev; try { ev = normalizeEvent(JSON.parse(body || "{}")); } catch { ev = null; }
       if (!ev) return respond(res, { error: "bad json" });
@@ -643,7 +714,13 @@ async function run(dir) {
         })().catch((e) => respond(res, { error: e.message }, 500));
         return;
       }
+      if (req.method === "POST" && req.url === "/announce") {                                   // another daemon says where the pad is
+        const u = announcedUrl(req.socket.remoteAddress, ev.port || cfg.port);
+        if (ev.pad) adopt(u, "announced"); else if (host === u) { log(`pad left ${u}`); host = null; setTimeout(findHost, 1000); }
+        return respond(res, { ok: true, relay: !pad });
+      }
       if (req.method !== "POST" || req.url !== "/hook") { res.writeHead(404); return res.end(); }
+      if (!pad && host && !req.headers["x-cm2-relayed"]) return relay(req, res, body);           // this machine has no pad: the host does the work
       const changed = engine.handle(ev);
       if (changed) activity();
       if (changed) { log(`${ev.hook_event_name}${ev.notification_type ? "/" + ev.notification_type : ""} ${String(ev.session_id).slice(0, 8)} -> ${engine.sessions.get(ev.session_id)?.state ?? "gone"} slot ${engine.sessions.get(ev.session_id)?.slot ?? "-"}`); schedule(); }
@@ -672,6 +749,8 @@ async function run(dir) {
     const f = name === "claude"; if (f === claudeFocused) return; claudeFocused = f;
     if (f && cfg.focusDowngrade && engine.downgradeSelected()) { log("Claude focused: selected session read"); schedule(); }
   }), 1000);
+  setTimeout(findHost, 1500);
+  setInterval(() => { if (pad) announce(true); else findHost(); }, 60000);
   setInterval(async () => {
     if (engine.sweep()) schedule();
     if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); const km = await pad.readKeymap(); device.agentKeys = await checkAgentKeys(km, st); lastKeymap = km; Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
@@ -680,6 +759,7 @@ async function run(dir) {
 
   const stop = async () => {
     log("shutting down");
+    if (pad) await Promise.race([announce(false), sleep(1000)]);
     if (pad) { try { await pad.setThreads(engine.render().threads.map((t) => ({ ...t, c: 0, b: 0, e: 0 }))); await pad.setZones({ e: 0, b: 0, s: 0, m: 0, c: 0 }, keysZone); } catch { /* best effort */ } await pad.close(); }
     try { fs.unlinkSync(pidfile(dir)); } catch { /* none */ }
     process.exit(0);
@@ -687,9 +767,11 @@ async function run(dir) {
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
 
   // connect loop: the pad drops on sleep / range / battery; just keep reopening it
+  let noHid = false;
   for (;;) {
-    const info = Pad.list()[0];
-    if (!info) { if (device.connected) log("pad gone"); device = { connected: false }; await sleep(3000); continue; }
+    let info = null;
+    try { info = Pad.list()[0]; } catch (e) { if (!noHid) log(`no usable node-hid on this machine: relay only (${String(e.message).split("\n")[0]})`); noHid = true; }
+    if (!info) { if (device.connected) log("pad gone"); device = { connected: false }; await sleep(noHid ? 60000 : 3000); continue; }
     try {
       pad = await Pad.open(info);
       // listen from the first moment: an 'error' with no listener would throw and kill the process
@@ -704,9 +786,11 @@ async function run(dir) {
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
       pad.on("key", onKey); pad.on("joystick", stick);
       lastSent = ""; pushFails = 0; await push(true);
+      host = null; announce(true);
       await gone;
     } catch (e) { log("connect failed:", e.message); }
     dropPad = null;
+    if (device.connected) announce(false);
     if (pad) { await pad.close().catch(() => {}); pad = null; }
     device = { connected: false };
     await sleep(2000);
@@ -751,6 +835,19 @@ function writeLauncher(dir, vbs = path.join(__dirname, "cm2d.vbs")) {   // next 
   const fixed = path.join(dir, "cm2d.vbs"); if (fixed !== vbs) { try { fs.writeFileSync(fixed, text); } catch { /* fine */ } }
   return vbs;
 }
+/** Start the daemon detached from this process: the logon task on Windows (it must live in the interactive session to
+ *  inject keys), a plain detached node elsewhere. No-op if one is already running. */
+function startDetached(dir, cfg) {
+  const pid = readPid(dir);
+  if (alive(pid) && pid !== process.pid && isCm2d(pid)) return log(`cm2d already running (pid ${pid})`);
+  if (process.platform === "win32") {
+    try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task */ }
+    return spawn("wscript.exe", [writeLauncher(dir)], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  }
+  const out = fs.openSync(path.join(dir, "cm2d.log"), "a");
+  spawn(process.execPath, [__filename, "run"], { detached: true, stdio: ["ignore", out, out], env: process.env }).unref();
+  log(`started cm2d (log ${path.join(dir, "cm2d.log")})`);
+}
 function taskCmd(dir, action) {
   if (action === "install") {
     writeLauncher(dir);   // the task runs the FIXED copy (%APPDATA%\cm2-claude\cm2d.vbs), so a plugin update never strands it
@@ -770,7 +867,8 @@ async function main(argv) {
   switch (cmd) {
     case "run": return run(dir);
     case "stop": return stopDaemon(dir, cfg.port);
-    case "restart": await stopDaemon(dir, cfg.port); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
+    case "start": return startDetached(dir, cfg);
+    case "restart": await stopDaemon(dir, cfg.port); return startDetached(dir, cfg);
     case "press": return post("/key", { key: argv[1], act: argv[2] === undefined ? 1 : +argv[2] });
     case "stick": return post("/key", { joystick: { a: +argv[1], d: argv[2] === undefined ? 1 : +argv[2] } });
     case "install": case "uninstall": return taskCmd(dir, cmd);
@@ -801,13 +899,13 @@ async function main(argv) {
         await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, padExtras(cfg)));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
-      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|press KEY|state|demo"); process.exitCode = 2;
+      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|start|stop|restart|press KEY|state|demo"); process.exitCode = 2;
     }
   } finally {
     await pad.close();
-    if (daemonWas) { if (process.platform === "win32") execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); else console.log("daemon was stopped; start it again"); }
+    if (daemonWas) startDetached(dir, cfg);
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, padExtras, sectorOf, Ptt, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, padExtras, sectorOf, Ptt, peerIps, announcedUrl, request, run, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

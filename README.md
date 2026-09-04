@@ -104,19 +104,36 @@ daemon. On Windows the hook script runs under Git Bash, which Claude Code needs
 anyway. A local-copy marketplace does not update itself: re-copy, then
 `claude plugin marketplace update cm2-claude`.
 
+**Many machines, one pad.** A HID device is only reachable from the machine it
+is paired to, so exactly one daemon drives the pad. Every other machine's plugin
+still runs the daemon, as a *relay*: its hooks post to `localhost`, and the
+relay forwards them to the host, permission holds included, so an rpc session
+still gets its APPR/REJ from the pad on the desktop. Finding the host is
+automatic and two-way: the host announces itself to every online Tailscale peer
+(and to `peers` in its config) whenever the pad connects or drops and once a
+minute, and a relay probes the same peers whenever it has no host. A relay only
+adopts a host after reading its `/state` and seeing a connected pad, so an
+announcement cannot send it anywhere else, and it drops a host only when
+forwarding fails. Moving the pad to another machine (a Bluetooth slot switch)
+is just the new host announcing. A relay's `/state` and `/` are the host's; a
+relay does not need `node-hid` (it is installed when it can be, for a pad that
+may turn up locally). Machines Tailscale cannot list from each other, such as
+WSL, go in `peers` (`["http://100.124.22.74:7777"]`) on either side, or use
+the direct setting below.
+
 **Configuring the plugin.** Claude Code plugins have no settings page, and this
-one needs exactly one setting: where the daemon is. The hook script uses
-`CM2_URL` from the environment if set, else the single line in
-`~/.config/cm2-claude/url` (for example `http://100.124.22.74:7777`), else
-`http://127.0.0.1:7777`. Write that file on every machine whose sessions should
-reach a daemon elsewhere; on the pad's own machine the default is right.
+one has one optional setting: a daemon to talk to *directly*, skipping the local
+relay. The hook script uses `CM2_URL` from the environment if set, else the
+single line in `~/.config/cm2-claude/url` (for example
+`http://100.124.22.74:7777`), else `http://127.0.0.1:7777`, which is the local
+relay (or the host, on the pad's machine). Set it where running a relay is not
+wanted, or where Node is missing (Termux); `/cm2` prints which address it is
+using. From WSL use the desktop's Tailscale address, not the WSL gateway.
 Everything else (keys, colours, hold time, talk key) is configured in the
-daemon's own page, not in the plugin. `/cm2` prints which address it is using.
-From WSL use the desktop's Tailscale address; the WSL gateway does not reach the
-daemon. `hooks/install-hooks.sh` is the no-plugin fallback (writes the hooks into
-`~/.claude/settings.json`; `--remove` takes them out). Sessions already running
-when the plugin is installed keep the hooks they started with; new sessions use
-the plugin.
+host's own page, not in the plugin. `hooks/install-hooks.sh` is the no-plugin
+fallback (writes the hooks into `~/.claude/settings.json`; `--remove` takes
+them out). Sessions already running when the plugin is installed keep the hooks
+they started with; new sessions use the plugin.
 
 Android: Claude Code runs there only under Termux, where the plugin works like
 anywhere else, so a Termux session lights the pad. The daemon cannot run on
@@ -196,7 +213,7 @@ mini-game. All of it is on by default and switchable in the configurator.
 | Codex | here |
 |---|---|
 | **Dial** turns move the highlight (Arrow Up / Down), click is Enter, hold 500 ms opens settings; using it puts the pad in "navigating": blue snake ring, and AG00 turns red and acts as Escape | `dial: "navigate"`: identical, hold opens this configurator; "navigating" lasts 2 s after the last dial event (Codex knows when a menu is open; we don't). `dial: "keymap"` restores plain keycodes from `encoders` |
-| **Stick** fires one command per push past half deflection, re-arms at rest; up plan mode, down sidebar, left back, right forward | `stick.mode: "vendor"` with the same deadzones and edge trigger; each direction is a chord of virtual-key codes, default Shift+Tab, Ctrl+B, Alt+Left, Alt+Right. `"keymap"` restores `joystick` |
+| **Stick** fires one command per push past half deflection, re-arms at rest; up plan mode, down sidebar, left back, right forward | `stick.mode: "vendor"` with the same deadzones and edge trigger; each direction is a chord of virtual-key codes. Defaults are the Claude desktop app's documented Code-tab shortcuts: **left/right cycle to the previous/next session in the sidebar** (Ctrl+Shift+Tab / Ctrl+Tab — this is how you switch sessions from the pad today), up cycles the transcript view modes (Ctrl+O), down toggles the terminal pane (Ctrl+`). `"keymap"` restores `joystick` |
 | **Agent keys** show the six most recently updated threads, most recent first | `agentSource: "recent"` (keys re-sort as sessions become active) or `"sticky"` (a session keeps its key) |
 | single tap opens the thread in the background, double tap within 350 ms also raises the window | tap selects and acknowledges (and fires the gated deep link); double tap within `doubleTapMs` raises the Claude window |
 | the selected thread's green clears when the window is focused | `focusDowngrade`: the daemon polls the foreground window; when it is Claude, the selected session's green turns white |
@@ -270,7 +287,9 @@ talk), `talkKeys`/`talkMode`, `focusOnPress`, `flashMs`, `layout`, `encoders`,
 `joystick`, `lights` (what `setup-keys` writes: the 13 keys, the dial, the
 joystick and the pad's own stored lighting; null keeps what the pad has),
 `dial`, `stick`, `actionKeys`, `autoDimMs`, `agentSource`, `doubleTapMs`,
-`focusDowngrade`, `ambientMode` (the [Codex behaviours](#the-codex-behaviours)).
+`focusDowngrade`, `ambientMode` (the [Codex behaviours](#the-codex-behaviours)),
+`peers` (other daemons to announce to and look for, besides the Tailscale peers;
+see [Many machines, one pad](#install)).
 
 ## Caveats
 

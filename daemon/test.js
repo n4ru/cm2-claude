@@ -179,3 +179,60 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   const h = p.join(fs.mkdtempSync(p.join(os.tmpdir(), "cm2home-")), "state"); process.env.CM2_HOME = h;
   assert.equal(homeDir(), h); assert.ok(fs.existsSync(h)); delete process.env.CM2_HOME; }
 console.log("ok");
+
+// ---- many daemons, one pad: tailscale parsing, announce URL, and a relay in front of a fake host (no pad, no node-hid needed)
+{ const { peerIps, announcedUrl } = require("./cm2d.js");
+  assert.deepEqual(peerIps({ Peer: { a: { Online: true, TailscaleIPs: ["fd7a::1", "100.1.2.3"] }, b: { Online: false, TailscaleIPs: ["100.9.9.9"] }, c: { Online: true } } }), ["100.1.2.3"]);
+  assert.deepEqual(peerIps(null), []);
+  assert.equal(announcedUrl("::ffff:100.1.2.3", 7777), "http://100.1.2.3:7777");
+  assert.equal(announcedUrl("fd7a::1", 7000), "http://[fd7a::1]:7000");
+}
+(async () => {
+  const { run, request } = require("./cm2d.js"), os = require("os"), fs = require("fs"), p = require("path"), http = require("http");
+  process.env.CM2_TAILSCALE = "/nonexistent-cm2-test-tailscale"; // hermetic: never probe the real tailnet
+  const fake = (name, hostField = "self") => { // stand-in daemon: /state host:"self" = it holds the pad, else a relay; records /hook; can hold a PermissionRequest
+    const f = { name, got: [], closed: 0, hold: null, connected: true, hostField };
+    f.server = http.createServer((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+      if (req.url === "/state") { res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ device: { connected: f.connected }, host: f.hostField, sessions: [], name })); }
+      if (req.url === "/announce") { res.writeHead(200); return res.end("{}"); }
+      const ev = JSON.parse(b); f.got.push({ ev, relayed: req.headers["x-cm2-relayed"] });
+      if (ev.hook_event_name === "PermissionRequest") { f.hold = (d) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ hookSpecificOutput: { decision: d } })); }; res.on("close", () => f.closed++); return; }
+      res.writeHead(204); res.end();
+    }); });
+    return new Promise((ok) => f.server.listen(0, "127.0.0.1", () => { f.port = f.server.address().port; f.url = `http://127.0.0.1:${f.port}`; ok(f); }));
+  };
+  const A = await fake("A"), C = await fake("C"), R = await fake("R", "http://198.51.100.7:7777"); // R is a relay (host != self): must never be adopted
+  const dir = fs.mkdtempSync(p.join(os.tmpdir(), "cm2relay-"));
+  const port = 17000 + Math.floor(Math.random() * 1000);
+  fs.writeFileSync(p.join(dir, "config.json"), JSON.stringify({ port, bind: "127.0.0.1", peers: [R.url, A.url], holdMs: 5000, autoDimMs: 0 })); // R first: a relay must be skipped over
+  run(dir).catch((e) => { console.error("relay run failed:", e); process.exit(1); });
+  const me = `http://127.0.0.1:${port}`;
+  const until = async (f, what) => { for (let i = 0; i < 100; i++) { if (await f()) return; await new Promise((r) => setTimeout(r, 100)); } throw new Error("timed out waiting for " + what); };
+  const name = async () => { try { return JSON.parse((await request("GET", me + "/state")).body).name; } catch { return null; } };
+  await until(async () => (await name()) === "A", "relay to adopt the real host A, not the relay R");
+  assert.equal(R.got.length, 0);  // R was probed, found to be a relay, and never forwarded to
+  await request("POST", me + "/hook", { session_id: "s1", hook_event_name: "Stop" });
+  assert.equal(A.got.length, 1); assert.equal(A.got[0].relayed, "1"); assert.equal(A.got[0].ev.session_id, "s1");
+  // a hold is proxied: the host's answer comes back through the relay
+  const held = request("POST", me + "/hook", { session_id: "s1", hook_event_name: "PermissionRequest" }, 8000);
+  await until(async () => A.hold, "hold to reach A"); A.hold("allow");
+  assert.equal(JSON.parse((await held).body).hookSpecificOutput.decision, "allow");
+  // the hook giving up (curl timeout) releases the host's hold too
+  A.hold = null;
+  const q = http.request(me + "/hook", { method: "POST", headers: { "Content-Type": "application/json" } }); q.on("error", () => {}); q.end(JSON.stringify({ session_id: "s2", hook_event_name: "PermissionRequest" }));
+  await until(async () => A.hold, "second hold"); q.destroy();
+  await until(async () => A.closed >= 1, "host to see the client go");
+  // the pad moves A -> C: A loses it (its /state goes disconnected) and announces off; C has it and announces on
+  A.connected = false;
+  await request("POST", me + "/announce", { port: A.port, pad: false });
+  await request("POST", me + "/announce", { port: C.port, pad: true });
+  await until(async () => (await name()) === "C", "relay to adopt C after the pad moved");
+  await request("POST", me + "/hook", { session_id: "s3", hook_event_name: "Stop" });
+  assert.equal(C.got.length, 1); assert.equal(A.got.length, 3);   // A saw s1 Stop, s1 hold, s2 hold; nothing after the switch
+  // a relayed request is never forwarded again (no loops): the relay handles it itself
+  await request("POST", me + "/hook", { session_id: "s4", hook_event_name: "Stop" }, 2000).then(() => {});
+  const r = await new Promise((ok, no) => { const x = http.request(me + "/hook", { method: "POST", headers: { "Content-Type": "application/json", "x-cm2-relayed": "1" } }, (res) => { res.resume(); res.on("end", () => ok(res.statusCode)); }); x.on("error", no); x.end(JSON.stringify({ session_id: "s5", hook_event_name: "Stop" })); });
+  assert.equal(r, 204); assert.equal(C.got.length, 2);
+  console.log("relay ok");
+  process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });

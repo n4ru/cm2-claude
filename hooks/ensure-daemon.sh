@@ -1,13 +1,15 @@
 #!/bin/sh
-# SessionStart hook: make sure cm2d is running. It must run in the pad machine's INTERACTIVE Windows session (it injects
-# keystrokes), which is why everything goes through the "cm2d" logon task: a process started from an ssh session can't.
-#  - On the pad's machine (Git Bash): create the task on first use (`node cm2d.js install`, user-level, no admin; set
-#    CM2_NO_AUTOSTART=1 to skip that and just start the daemon detached instead), otherwise run the task.
-#  - Elsewhere: if ~/.config/cm2-claude/ssh names the pad's machine, run the task there over ssh. Otherwise nothing to do.
+# SessionStart hook: make sure a cm2d is answering for this machine's sessions.
+#  - Windows (Git Bash): the daemon must live in the INTERACTIVE session (it injects keystrokes), so it goes through the
+#    "cm2d" logon task: created on first use (`node cm2d.js install`, user-level, no admin; CM2_NO_AUTOSTART=1 skips that
+#    and starts the daemon detached instead), run whenever the daemon isn't answering.
+#  - Elsewhere: start this machine's own daemon, which relays to whichever daemon has the pad (found over the tailnet or
+#    cfg.peers); and if ~/.config/cm2-claude/ssh names a Windows pad machine, run its task over ssh as well.
+#  - A ~/.config/cm2-claude/url pointing straight at a remote daemon that answers means nothing to do here.
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/cm2-claude"
 [ -z "$CM2_NO_DAEMON" ] || exit 0                                            # opt out
 u="${CM2_URL:-$(cat "$cfg/url" 2>/dev/null)}"; u="${u:-http://127.0.0.1:7777}"
-curl -s -m 1 -o /dev/null "$u/state" && exit 0                              # already running
+curl -s -m 2 "$u/state" 2>/dev/null | grep -q '"connected":true' && exit 0  # a daemon with the pad is already answering
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -20,8 +22,13 @@ case "$(uname -s)" in
       wscript.exe "$(cygpath -w "$root/daemon/cm2d.vbs")"
     fi ;;
   *)
-    host="$(cat "$cfg/ssh" 2>/dev/null)"; [ -n "$host" ] || exit 0
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" schtasks /Run /TN cm2d >/dev/null 2>&1 &
-    ;;
+    # revive the Windows host over ssh if one is configured, and run this machine's own daemon: a relay that finds the
+    # host by itself and forwards the hooks (no node-hid needed for that; it is installed if it can be, for a local pad)
+    host="$(cat "$cfg/ssh" 2>/dev/null)"; [ -n "$host" ] && ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" schtasks /Run /TN cm2d >/dev/null 2>&1 &
+    root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+    cd "$root/daemon" || exit 0
+    command -v node >/dev/null 2>&1 || exit 0
+    [ -d node_modules/node-hid ] || npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1
+    node cm2d.js start >/dev/null 2>&1 ;;
 esac
 exit 0
