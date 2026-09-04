@@ -51,7 +51,10 @@ const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = r
   for (const id of ["d", "e", "f", "g"]) ev(id, "UserPromptSubmit");                            // everyone busy now
   t++; ev("i", "UserPromptSubmit"); assert.notEqual(e.sessions.get("i").slot, null);            // still gets a key: stalest busy one gives way
   assert.equal([...e.sessions.values()].filter((s) => s.slot !== null).length, 6);
-  // ttl sweep
+  // round-trips through JSON (restart persistence), then the ttl sweep
+  const e2 = new Engine(DEFAULTS, () => t); e2.load(JSON.parse(JSON.stringify(e)));
+  assert.equal(e2.sessions.size, e.sessions.size); assert.equal(e2.selected, e.selected); assert.deepEqual(e2.render(), e.render());
+  e2.load(null); e2.load({ sessions: "junk" }); assert.equal(e2.sessions.size, e.sessions.size);   // bad files are ignored
   t += DEFAULTS.ttlMs + 1; assert.equal(e.sweep(), true); assert.equal(e.sessions.size, 0);
 }
 
@@ -106,4 +109,13 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
 { const { normalizeEvent } = require("./cm2d.js");
   assert.equal(normalizeEvent(null), null); assert.equal(normalizeEvent([1]), null); assert.equal(normalizeEvent("x"), null);
   assert.equal(normalizeEvent({ session_id: 1 }).session_id, "1"); assert.equal(normalizeEvent({}).session_id, undefined); }
+// desktop session lookup: <store>/<account>/<org>/local_*.json, matched on cliSessionId
+{ const { desktopSession } = require("./cm2d.js"), os = require("os"), fs = require("fs"), p = require("path");
+  const root = fs.mkdtempSync(p.join(os.tmpdir(), "ccs-")), d = p.join(root, "acct", "org"); fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(p.join(d, "local_aaa.json"), JSON.stringify({ sessionId: "local_aaa", cliSessionId: "11111111-1111-1111-1111-111111111111", title: "One" }));
+  fs.writeFileSync(p.join(d, "local_bbb.json"), JSON.stringify({ sessionId: "local_bbb", cliSessionId: "22222222-2222-2222-2222-222222222222", title: "Two" }));
+  fs.writeFileSync(p.join(d, "deleted_x"), "11111111-1111-1111-1111-111111111111");                    // not a session file
+  assert.deepEqual(desktopSession("22222222-2222-2222-2222-222222222222", root), { localId: "local_bbb", title: "Two" });
+  assert.equal(desktopSession("33333333-3333-3333-3333-333333333333", root), null);
+  assert.equal(desktopSession("11111111-1111-1111-1111-111111111111", p.join(root, "nope")), null); }
 console.log("ok");

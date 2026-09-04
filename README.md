@@ -63,7 +63,14 @@ events. States and their key colours: **off** (no key), **idle** white,
 
 Pad side: APPR/REJ answer the held prompt of the selected session, else the only
 held one, else nothing; the answered session goes to working. Selection toggles
-on the same key; the selected key breathes. When all six keys are taken, the
+on the same key; the selected key breathes, and for four seconds the other keys
+flash the selected session's colour (Codex does the same). Selecting also asks
+the Claude desktop app to open that session through its
+`claude://code/continue?session=…` deep link, looked up by Claude Code id in the
+app's session store (`%APPDATA%\Claude\claude-code-sessions`), which is also
+where the titles in `/state` come from. That entry point is behind a server-side
+feature flag in current builds (the app logs "code entry deep link gated off"),
+so it does nothing yet; it starts working the day the flag flips. When all six keys are taken, the
 stalest session gives its key up, idle and unread first, then error, working,
 awaiting last. The ring shows the most urgent state present: awaiting > error >
 unread > working > idle (off). Holding TALK turns every non-agent key red until
@@ -78,7 +85,8 @@ a keyboard shortcut on the desktop at each edge (`talkKeys`, virtual-key codes,
 default Win+H, and `talkMode`). `"toggle"` taps the chord on press and again on
 release, which opens Windows voice typing while held and closes it after: the
 dictated text lands in whatever has focus, so with the Claude window focused it
-goes into the open session's prompt. `"hold"` keeps the chord pressed for the
+goes into the open session's prompt. While held, the non-agent keys glow red and
+the ring runs Codex's green "recording" snake. `"hold"` keeps the chord pressed for the
 duration, for a push-to-talk hotkey. The Windows Claude app exposes no dictation
 hotkey in its config (its Caps Lock "speak to Claude" feature appears to be the
 macOS quick-entry path); if a later build lists one under Keyboard Shortcuts, put
@@ -157,7 +165,10 @@ explicit `{effect,color,brightness}`), `actions` (which ACT keys are approve/rej
 * Agent keys and APPR/REJ stop typing; they only report to cm2d. `setup-keys`
   saves the previous keymap next to the daemon first; `node cm2d.js restore
   <backup>` puts it back.
-* **The Work Louder Input app is not needed and will break this while it runs.**
+* **You do not need the Work Louder Input app.** cm2d reads and writes the keymap,
+  drives all three lighting zones, writes macros, and receives key events on its
+  own. Input is only for firmware updates: open it, update, close it. **It will
+  break this while it runs.**
   It syncs its own stored profile onto the pad, which replaces the agent keycodes
   with plain letters; after that every lighting command is still acknowledged
   with `{ok:1}` and renders nothing (the ring and backlight keep working, the
@@ -177,7 +188,8 @@ explicit `{effect,color,brightness}`), `actions` (which ACT keys are approve/rej
   key press selects and acknowledges, nothing more.
 * One daemon owns the pad. `run` writes `cm2d.pid` and retires any older instance
   on startup (asking it to quit gracefully first, so it blanks the pad); if the
-  pad ever freezes, `node cm2d.js restart` is the reset.
+  pad ever freezes, `node cm2d.js restart` is the reset. The session table is
+  saved to `sessions.json` and restored on start, so a restart keeps the keys lit.
 * `/hook` and `/state` are open to whatever can reach the port (your tailnet);
   `/key` and `/quit` only answer from the desktop itself. Nothing on the wire is
   authenticated beyond that, so keep the port off untrusted networks.

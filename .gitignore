@@ -6,3 +6,4 @@ config.json
 *.pid
 *.vbs
 keymap.after*.json
+sessions.json

@@ -59,6 +59,8 @@ const DEFAULTS = {
   // "toggle" taps the chord on press and again on release (Windows voice typing, Win+H: opens, then closes).
   // "hold" presses the chord down on press and lifts it on release (a push-to-talk hotkey such as Claude's dictation shortcut).
   talkKeys: [0x5b, 0x48], talkMode: "toggle",
+  focusOnPress: true,   // agent key press opens that session in the Claude desktop app (claude://code/continue deep link)
+  flashMs: 4000,        // after a selection change the other keys flash the selected session's colour, as Codex does
   // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
   // a plain keycode types that key, an ARRAY is a chord written as an on-pad macro (modifiers held, last key
   // clicked: ["KC_LGUI","KC_H"] = Win+H), null keeps whatever is on the pad. Spares default to Esc (interrupt
@@ -125,6 +127,30 @@ function sendKeys(vks, edge = "t") {
     keysProc.on("error", (e) => log("keys:", e.message));
   }
   if (vks) keysProc.stdin.write(`${edge} ${vks.join(" ")}\n`);
+}
+// The Claude desktop app stores one JSON per session under %APPDATA%\Claude\claude-code-sessions\<account>\<org>\local_*.json
+// carrying its own id (sessionId, "local_…"), the Claude Code id the hooks report (cliSessionId) and a title. Its
+// claude://code/continue?session=<local id> deep link opens that session, which is how an agent key press "switches thread".
+const SESSIONS_DIR = process.env.APPDATA ? path.join(process.env.APPDATA, "Claude", "claude-code-sessions") : null;
+function desktopSession(cliId, dir = SESSIONS_DIR) {
+  if (!dir || !cliId) return null;
+  try {
+    for (const acct of fs.readdirSync(dir)) for (const org of fs.readdirSync(path.join(dir, acct))) {
+      const d = path.join(dir, acct, org);
+      for (const f of fs.readdirSync(d)) {
+        if (!f.startsWith("local_") || !f.endsWith(".json")) continue;
+        const txt = fs.readFileSync(path.join(d, f), "utf8");
+        if (!txt.includes(cliId)) continue;
+        const j = JSON.parse(txt);
+        if (j.cliSessionId === cliId) return { localId: j.sessionId, title: j.title || "" };
+      }
+    }
+  } catch { /* store missing or unreadable: no focus, no titles */ }
+  return null;
+}
+function openInClaude(localId) {
+  if (process.platform !== "win32") return log("openInClaude (no-op off Windows):", localId);
+  spawn("rundll32", ["url.dll,FileProtocolHandler", `claude://code/continue?session=${localId}`], { detached: true, stdio: "ignore", windowsHide: true }).unref();
 }
 const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
 
@@ -287,6 +313,8 @@ class Engine {
     for (const s of [...this.sessions.values()]) if (s.seen < cutoff) { this.sessions.delete(s.id); if (this.selected === s.id) this.selected = null; changed = true; }
     return changed;
   }
+  toJSON() { return { selected: this.selected, sessions: [...this.sessions.values()] }; }
+  load(j) { if (!j || !Array.isArray(j.sessions)) return; this.sessions = new Map(j.sessions.map((s) => [s.id, s])); this.selected = j.selected ?? null; this.sweep(); }
   render() {
     const { colors, brightness } = this.cfg;
     const threads = Array.from({ length: SLOTS }, (_, i) => ({ id: i, c: 0, b: 0, e: 0, s: 0, sk: 0, sa: 0 }));
@@ -320,10 +348,16 @@ async function run(dir) {
   fs.writeFileSync(pidfile(dir), String(process.pid));
   process.on("uncaughtException", (e) => log("crash guard:", e.stack || e)); // one bad request or odd key event must not end a weeks-long run
   const engine = new Engine(cfg);
+  const stateFile = path.join(dir, "sessions.json");   // survives restarts; the 12 h sweep still applies on load
+  try { engine.load(JSON.parse(fs.readFileSync(stateFile, "utf8"))); if (engine.sessions.size) log(`restored ${engine.sessions.size} session(s)`); } catch { /* first run */ }
+  let saveTimer = null;
+  const save = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => fs.writeFile(stateFile, JSON.stringify(engine), () => {}), 500); };
   const holds = new Map(); // session id -> respond(decision|null)
   let pad = null, keysZone = { e: 0, b: 0, s: 0, m: 0, c: 0 }, lastSent = "", device = { connected: false }, pushTimer = null;
   let dropPad = null, pushFails = 0; // a handle that stays "open" through BLE sleep answers nothing: after 3 failed pushes, reconnect
-  let talkHeld = false;              // while the talk key is down the non-agent keys glow red: "recording"
+  let talkHeld = false;              // while the talk key is down the non-agent keys glow red and the ring runs Codex's green "recording" snake
+  let flash = null;                  // {until, color}: the other keys show the newly selected session's colour for flashMs
+  const VOICE_AMBIENT = { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: 0x2e8b57 };
 
   const respond = (res, obj) => { res.writeHead(obj ? 200 : 204, { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
@@ -331,8 +365,9 @@ async function run(dir) {
   async function push(force) {
     if (!pad) return;
     const { threads, top } = engine.render();
-    const ambient = zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
-    const keys = talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone;
+    if (flash && flash.until <= Date.now()) flash = null;
+    const ambient = talkHeld ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
+    const keys = talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : keysZone;
     const payload = JSON.stringify([threads, ambient, keys]);
     if (!force && payload === lastSent) return;
     try {
@@ -344,7 +379,7 @@ async function run(dir) {
       if (++pushFails >= 3 && dropPad) { log("pad unresponsive, reconnecting"); dropPad(); }
     }
   }
-  const schedule = (force) => { clearTimeout(pushTimer); pushTimer = setTimeout(() => push(force), 80); };
+  const schedule = (force) => { clearTimeout(pushTimer); pushTimer = setTimeout(() => push(force), 80); save(); };
 
   // thstatus only lights keys the keymap declares as agent keys. The Work Louder Input app syncs its own profile
   // onto the pad and strips them, after which every lighting call still ACKs and renders nothing. So: count them,
@@ -384,14 +419,24 @@ async function run(dir) {
         log(`talk: ${talkHeld ? "listening" : "stop"}`);
         if (pad) {                                                  // one RPC for the light instead of the full two-command push
           const { top } = engine.render();
-          pad.setZones(zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
+          pad.setZones(talkHeld ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
           lastSent = "";
         }
         return;
       }
       if (act !== 1) return;
       const m = /^AG0([0-5])$/.exec(key || "");
-      if (m) { engine.press(+m[1]); log(`key ${key} -> select ${engine.selected ? engine.selected.slice(0, 8) : "none"}`); return schedule(); }
+      if (m) {
+        const before = engine.selected;
+        engine.press(+m[1]);
+        const s = engine.selected && engine.sessions.get(engine.selected);
+        log(`key ${key} -> select ${s ? s.id.slice(0, 8) : "none"}`);
+        if (s && engine.selected !== before) {
+          if (cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
+          if (cfg.focusOnPress) { const d = desktopSession(s.id); if (d) { openInClaude(d.localId); log(`  opening "${d.title}" in Claude`); } else log("  no desktop session found for it"); }
+        }
+        return schedule();
+      }
       if (key === cfg.actions.approve) return answer("approve");
       if (key === cfg.actions.reject) return answer("reject");
     } catch (e) { log("key handler:", e.message); }
@@ -402,7 +447,7 @@ async function run(dir) {
     req.on("data", (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on("end", () => {
       if (req.method === "GET" && req.url === "/state") {
-        return respond(res, { device, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || "") })) });
+        return respond(res, { device, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || ""), title: desktopSession(s.id)?.title })) });
       }
       let ev; try { ev = normalizeEvent(JSON.parse(body || "{}")); } catch { ev = null; }
       if (!ev) return respond(res, { error: "bad json" });
@@ -558,5 +603,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
