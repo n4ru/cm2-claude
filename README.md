@@ -121,11 +121,36 @@ CM2_URL=http://100.124.22.74:7777 hooks/install-hooks.sh     # merges into ~/.cl
 From WSL on the desktop use the same Tailscale address; the WSL gateway address
 does not reach the daemon.
 
+Then open `http://<desktop>:7777/` for the configurator (next section).
+
 Check: `node cm2d.js state` (or `curl http://desktop:7777/state`), `node cm2d.js demo`
 walks six fake sessions through every colour, `node cm2d.js press AG00` simulates
 a pad key (`press ACT10 0` a release), `type cm2d.log` on the desktop. The pad commands (`status`, `backup`,
 `restore`, `setup-keys`) pause the daemon while they own the HID channel and
 resume it afterwards.
+
+## The configurator
+
+The daemon serves its own configurator at `http://<desktop>:7777/` (any browser on
+the tailnet), so the Input app is not needed for anything but firmware updates.
+
+![cm2-claude configurator](docs/ui.png)
+
+The pad is drawn live: agent keys in their session's colour with the session's
+title underneath, the selected key pulsing, an amber dot on a session whose
+permission prompt is waiting for APPR/REJ. Click any of the 13 keys to set what
+it sends (a keycode from the catalogue, a chord such as `KC_LGUI+KC_H` that is
+written to the pad as a macro, or "keep" to leave whatever the pad has). The dial,
+the joystick, the pad's own stored lighting, and every daemon setting (state
+colours, ring effects, hold-to-talk, brightness, hold time) are on the same page.
+
+![editing a key](docs/ui-editor.png)
+
+**Apply to pad** sends only the fields you changed to `POST /config`; the daemon
+validates them against the pad's current keymap, saves `config.json`, reprograms
+layer 1 over its own connection (no pause, no Input) and re-sends the lighting.
+`GET /config` returns the effective config plus what is on the pad. Like `/hook`,
+these answer any host that can reach the port.
 
 ## Keycaps (WRK MX Icon set + clear caps)
 

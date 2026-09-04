@@ -123,4 +123,16 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   assert.deepEqual(desktopSession("22222222-2222-2222-2222-222222222222", root), { localId: "local_bbb", title: "Two" });
   assert.equal(desktopSession("33333333-3333-3333-3333-333333333333", root), null);
   assert.equal(desktopSession("11111111-1111-1111-1111-111111111111", p.join(root, "nope")), null); }
+// config patches from the GUI: allowlist, deep merge for the small maps, dry-run validation against the pad's keymap
+{ const { applyConfigPatch } = require("./cm2d.js"), os = require("os"), fs = require("fs"), p = require("path");
+  const dir = fs.mkdtempSync(p.join(os.tmpdir(), "cm2cfg-")), cfg = JSON.parse(JSON.stringify(DEFAULTS));
+  const km = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KC_G", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]], encoders: [["KC_VOLU", "KC_VOLD", "KC_MPLY"]] } }] }] };
+  assert.equal(applyConfigPatch(dir, { brightness: 0.5, colors: { error: 0x123456 } }, cfg, km), false);
+  assert.equal(cfg.brightness, 0.5); assert.equal(cfg.colors.error, 0x123456); assert.equal(cfg.colors.idle, DEFAULTS.colors.idle);
+  const saved = JSON.parse(fs.readFileSync(p.join(dir, "config.json"), "utf8")); assert.deepEqual(saved, { brightness: 0.5, colors: { error: 0x123456 } });
+  assert.equal(applyConfigPatch(dir, { encoders: [["KC_UP", "KC_DOWN", "KC_ENT"]] }, cfg, km), true);       // pad-facing: reprogram
+  assert.throws(() => applyConfigPatch(dir, { port: 1 }, cfg, km), /not editable/);
+  assert.throws(() => applyConfigPatch(dir, { layout: [["KC_A"]] }, cfg, km), /shape/);                       // rejected before saving
+  assert.equal(JSON.parse(fs.readFileSync(p.join(dir, "config.json"), "utf8")).layout, undefined);
+  assert.throws(() => applyConfigPatch(dir, { actions: { approve: "ACT06" } }, cfg, km), /ACT06/); }
 console.log("ok");

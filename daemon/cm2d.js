@@ -83,6 +83,22 @@ function loadConfig(dir) {
   return { ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions } };
 }
 
+const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights"];
+const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions"];
+/** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
+ *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
+function applyConfigPatch(dir, patch, cfg, lastKeymap) {
+  const bad = Object.keys(patch).filter((k) => !EDITABLE.includes(k));
+  if (bad.length) throw new Error(`not editable: ${bad.join(", ")} (port and bind need a restart; edit config.json)`);
+  const f = path.join(dir, "config.json");
+  const user = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
+  for (const [k, v] of Object.entries(patch)) user[k] = ["colors", "ambient", "actions"].includes(k) && v && typeof v === "object" ? { ...(user[k] || {}), ...v } : v;
+  const next = { ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions } };
+  if (lastKeymap) agentKeymap(JSON.parse(JSON.stringify(lastKeymap)), next.layout, next.actions, next); // dry run: throws on a bad layout
+  fs.writeFileSync(f, JSON.stringify(user, null, 2) + "\n");
+  Object.assign(cfg, next);
+  return KEYMAP_KEYS.some((k) => k in patch);
+}
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -359,11 +375,22 @@ async function run(dir) {
   const holds = new Map(); // session id -> respond(decision|null)
   let pad = null, keysZone = { e: 0, b: 0, s: 0, m: 0, c: 0 }, lastSent = "", device = { connected: false }, pushTimer = null;
   let dropPad = null, pushFails = 0; // a handle that stays "open" through BLE sleep answers nothing: after 3 failed pushes, reconnect
+  let lastKeymap = null;             // the pad's keymap as last read or written; /config shows it, and the GUI's writes are validated against it
+  const keymapSummary = (km) => { const l = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]; return l ? { rows: l.layout.keymap, encoders: l.layout.encoders, joystick: l.layout.joystick, lights: l.lights, macros: km.macros || [] } : null; };
+  const computeKeysZone = (km) => zone(cfg.keys === "keymap" ? km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight : cfg.keys === "off" ? null : cfg.keys, 0xffffff, cfg.brightness);
+  /** Reprogram layer 1 from the config over the daemon's own connection (no pause needed: one writer). */
+  async function applyLayout() {
+    if (!pad) throw new Error("pad not connected");
+    const km = await pad.readKeymap();
+    await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }));
+    lastKeymap = km; keysZone = computeKeysZone(km); lastSent = "";
+    log("keymap reprogrammed from config"); await push(true);
+  }
   let talkHeld = false;              // while the talk key is down the non-agent keys glow red and the ring runs Codex's green "recording" snake
   let flash = null;                  // {until, color}: the other keys show the newly selected session's colour for flashMs
   const VOICE_AMBIENT = { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: 0x2e8b57 };
 
-  const respond = (res, obj) => { res.writeHead(obj ? 200 : 204, { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
+  const respond = (res, obj, status) => { res.writeHead(status || (obj ? 200 : 204), { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
 
   async function push(force) {
@@ -450,6 +477,10 @@ async function run(dir) {
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on("end", () => {
+      if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) {
+        return fs.readFile(path.join(dir, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
+      }
+      if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
       if (req.method === "GET" && req.url === "/state") {
         return respond(res, { device, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || ""), title: desktopSession(s.id)?.title })) });
       }
@@ -459,6 +490,18 @@ async function run(dir) {
         if (!loopback(req)) { res.writeHead(403); return res.end(); }
         if (req.url === "/quit") { respond(res); return stop(); }
         onKey(ev); return respond(res);                                                              // simulate a pad press (`cm2d press`)
+      }
+      if (req.method === "POST" && req.url === "/config") {                                     // the GUI's Apply
+        (async () => {
+          const warnings = [];
+          let reprogram;
+          try { reprogram = applyConfigPatch(dir, ev, cfg, lastKeymap); } catch (e) { return respond(res, { error: e.message }, 400); }
+          log("config updated:", Object.keys(ev).join(", "));
+          if (reprogram) { try { await applyLayout(); } catch (e) { warnings.push(`saved, but the pad was not reprogrammed: ${e.message}`); } }
+          else if (pad) { keysZone = computeKeysZone(lastKeymap); lastSent = ""; await push(true); }
+          respond(res, { ok: true, warnings });
+        })().catch((e) => respond(res, { error: e.message }, 500));
+        return;
       }
       if (req.method !== "POST" || req.url !== "/hook") { res.writeHead(404); return res.end(); }
       const changed = engine.handle(ev);
@@ -480,7 +523,7 @@ async function run(dir) {
   if (cfg.actions.talk) sendKeys(null); // warm up the injector so the first hold-to-talk is instant
   setInterval(async () => {
     if (engine.sweep()) schedule();
-    if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); device.agentKeys = await checkAgentKeys(await pad.readKeymap(), st); Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
+    if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); const km = await pad.readKeymap(); device.agentKeys = await checkAgentKeys(km, st); lastKeymap = km; Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
     push(true);
   }, cfg.resyncMs);
 
@@ -503,8 +546,7 @@ async function run(dir) {
       const st = await pad.status();
       const km = await pad.readKeymap().catch(() => null);
       const agentKeys = await checkAgentKeys(km, st);
-      const bl = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight;
-      keysZone = zone(cfg.keys === "keymap" ? bl : cfg.keys === "off" ? null : cfg.keys, 0xffffff, cfg.brightness);
+      lastKeymap = km; keysZone = computeKeysZone(km);
       device = { connected: true, path: info.path, usb: (info.release & 3) === 0, agentKeys, ...st };
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
       pad.on("key", onKey);
@@ -610,5 +652,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, writeLauncher, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
