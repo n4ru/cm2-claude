@@ -22,9 +22,11 @@ case "$(uname -s)" in
       wscript.exe "$(cygpath -w "$root/daemon/cm2d.vbs")"
     fi ;;
   *)
-    # revive the Windows host over ssh if one is configured, and run this machine's own daemon: a relay that finds the
-    # host by itself and forwards the hooks (no node-hid needed for that; it is installed if it can be, for a local pad)
+    # revive the Windows host over ssh if ~/.config/cm2-claude/ssh names it
     host="$(cat "$cfg/ssh" 2>/dev/null)"; [ -n "$host" ] && ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" schtasks /Run /TN cm2d >/dev/null 2>&1 &
+    # DIRECT mode: a remote url means the hooks post straight to that daemon, so run nothing here. RELAY mode (no url, or
+    # a localhost url) runs this machine's own daemon, which finds the host and forwards the hooks.
+    case "$u" in http://127.0.0.1:*|http://localhost:*|"") ;; *) exit 0 ;; esac
     root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
     cd "$root/daemon" || exit 0
     command -v node >/dev/null 2>&1 || exit 0

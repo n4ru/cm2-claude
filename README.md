@@ -121,6 +121,15 @@ may turn up locally). Machines Tailscale cannot list from each other, such as
 WSL, go in `peers` (`["http://100.124.22.74:7777"]`) on either side, or use
 the direct setting below.
 
+**Direct vs relay.** Setting `~/.config/cm2-claude/url` to a remote daemon's
+address (the pad machine's Tailscale address) puts that machine in *direct* mode:
+its hooks post straight to that daemon and it runs no local daemon of its own
+(the SessionStart hook still revives the pad machine over SSH if `ssh` is set, it
+just doesn't start a relay). Leaving `url` unset, or localhost, is *relay* mode:
+the machine runs a daemon that finds the host and forwards its hooks. Direct is
+simplest when the pad always lives on one machine; relay adds auto-discovery for
+a pad that moves. The pad machine itself always runs the daemon (it is the host).
+
 **Configuring the plugin.** Claude Code plugins have no settings page, and this
 one has one optional setting: a daemon to talk to *directly*, skipping the local
 relay. The hook script uses `CM2_URL` from the environment if set, else the
