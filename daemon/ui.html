@@ -69,6 +69,8 @@
   #status.err{color:var(--err)} #status.ok{color:var(--ok)} #status.warn{color:var(--amber)}
   #dirty{color:var(--amber);font-size:12px}
   .noconf{display:none}
+  [hidden]{display:none!important}
+  .off{opacity:.45}
   body.noconfig .needsconfig{display:none}
   body.noconfig .noconf{display:block;color:var(--dim);font-size:12px}
 </style>
@@ -100,6 +102,24 @@
       <button id="edKeep" class="ghost">keep pad's value</button>
       <button id="edClose" class="ghost">close</button>
     </div>
+    <div class="row" id="edActRow" hidden>
+      <label class="f"><span>daemon action</span>
+        <select id="edAct">
+          <option value="none">none</option>
+          <option value="approve">approve</option>
+          <option value="reject">reject</option>
+          <option value="talk">talk</option>
+          <option value="chord">chord (VK ints)</option>
+          <option value="text">type text</option>
+          <option value="raise">raise the Claude window</option>
+          <option value="open">open the configurator</option>
+        </select>
+      </label>
+      <input id="edActChord" class="mid mono" spellcheck="false" placeholder="16, 9" hidden>
+      <input id="edActText" class="mid" spellcheck="false" placeholder="text to type" hidden>
+      <label class="chk" id="edActEnterL" hidden><input type="checkbox" id="edActEnter"> press Enter after</label>
+    </div>
+    <div class="hint" id="edActHint"></div>
     <div class="hint" id="edHint"></div>
   </section>
 
@@ -107,24 +127,56 @@
     <section class="card needsconfig">
       <h2>Dial &amp; joystick</h2>
       <div class="row">
-        <label class="f"><span>clockwise</span><input id="encCw" class="mid" list="kcs" spellcheck="false"></label>
-      </div>
-      <div class="row">
-        <label class="f"><span>counter-cw</span><input id="encCcw" class="mid" list="kcs" spellcheck="false"></label>
-      </div>
-      <div class="row">
-        <label class="f"><span>press</span><input id="encPress" class="mid" list="kcs" spellcheck="false"></label>
-        <label class="chk"><input type="checkbox" id="encKeep"> keep</label>
-      </div>
-      <div class="row" style="margin-top:12px">
-        <label class="f"><span>joystick</span>
-          <select id="joyType">
-            <option value="">keep</option><option>JOYSTICK</option><option>RADIAL</option><option>VENDOR</option>
+        <label class="f"><span>Dial</span>
+          <select id="dialMode">
+            <option value="navigate">navigate — daemon drives it</option>
+            <option value="keymap">keymap — the pad sends keycodes</option>
           </select>
         </label>
       </div>
-      <div class="row" id="joySectorsRow" hidden>
-        <textarea id="joySectors" spellcheck="false" placeholder='[{"k":"KC_UP","a1":0.875,"a2":0.125}]'></textarea>
+      <div class="hint" id="dialHint"></div>
+      <div id="dialKeymap">
+        <div class="row">
+          <label class="f"><span>clockwise</span><input id="encCw" class="mid" list="kcs" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span>counter-cw</span><input id="encCcw" class="mid" list="kcs" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span>press</span><input id="encPress" class="mid" list="kcs" spellcheck="false"></label>
+          <label class="chk"><input type="checkbox" id="encKeep"> keep</label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <label class="f"><span>Stick</span>
+          <select id="stickMode">
+            <option value="vendor">vendor — daemon sends a shortcut</option>
+            <option value="keymap">keymap — the pad sends keycodes</option>
+          </select>
+        </label>
+      </div>
+      <div class="hint" id="stickHint"></div>
+      <div id="stickVendor" hidden>
+        <div class="row">
+          <label class="f"><span style="min-width:42px">up</span><input id="stk_up" class="num mono" spellcheck="false" placeholder="38"></label>
+          <label class="f"><span style="min-width:42px">down</span><input id="stk_down" class="num mono" spellcheck="false" placeholder="40"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span style="min-width:42px">left</span><input id="stk_left" class="num mono" spellcheck="false" placeholder="16, 9"></label>
+          <label class="f"><span style="min-width:42px">right</span><input id="stk_right" class="num mono" spellcheck="false" placeholder="9"></label>
+        </div>
+      </div>
+      <div id="joyKeymap">
+        <div class="row" style="margin-top:12px">
+          <label class="f"><span>joystick</span>
+            <select id="joyType">
+              <option value="">keep</option><option>JOYSTICK</option><option>RADIAL</option><option>VENDOR</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" id="joySectorsRow" hidden>
+          <textarea id="joySectors" spellcheck="false" placeholder='[{"k":"KC_UP","a1":0.875,"a2":0.125}]'></textarea>
+        </div>
       </div>
       <div class="noconf">Config unavailable — pad shown from /state only.</div>
     </section>
@@ -146,14 +198,41 @@
       <label class="f"><span>keys zone</span><select id="keysZone"></select></label>
     </div>
     <div class="row">
+      <label class="f"><span>Auto-dim</span><select id="autoDimMs"></select></label>
+      <span class="hint" style="margin-top:0">lights off after inactivity; any key, stick or status change wakes them</span>
+    </div>
+    <div class="row">
       <label class="f"><span>talkMode</span><select id="talkMode"><option value="toggle">toggle</option><option value="hold">hold</option></select></label>
       <label class="f"><span>talkKeys</span><input id="talkKeys" class="mid mono" spellcheck="false" placeholder="91, 72"></label>
       <label class="chk"><input type="checkbox" id="focusOnPress"> focus session on key press</label>
     </div>
     <div class="row">
+      <label class="f"><span style="min-width:104px">Agent keys show</span>
+        <select id="agentSource">
+          <option value="recent">the six most recently active sessions, most recent on AG00 (Codex default)</option>
+          <option value="sticky">a session keeps its key until it ends</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label class="f"><span style="min-width:150px">double-tap window (ms)</span><input type="number" id="doubleTapMs" class="num" min="0" step="50"></label>
+      <span class="hint" style="margin-top:0">second tap on an agent key raises the Claude window</span>
+    </div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="focusDowngrade"> green turns white for the selected session while the Claude window is focused (Codex)</label>
+    </div>
+    <div class="row">
       <label class="f"><span>approve</span><select id="actApprove"></select></label>
       <label class="f"><span>reject</span><select id="actReject"></select></label>
       <label class="f"><span>talk</span><select id="actTalk"></select></label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="f"><span style="min-width:72px">Ring shows</span>
+        <select id="ambientMode">
+          <option value="urgent">the most urgent state of any session</option>
+          <option value="codex">only the selected session working (blue snake), otherwise off</option>
+        </select>
+      </label>
     </div>
     <div id="stateRows" style="margin-top:12px"></div>
     <div class="hint" id="roHint"></div>
@@ -180,7 +259,22 @@ const STATES = ["idle", "working", "awaiting", "unread", "error"];
 const EFFECTS = ["off", "solid", "snake", "rainbow", "breath", "gradient"];
 const DEFC = { idle: 0xffffff, working: 0x304ffe, awaiting: 0xff6d00, unread: 0x00ff4c, error: 0xff0033 };
 const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode",
-                  "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights"];
+                  "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights",
+                  "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs",
+                  "focusDowngrade", "ambientMode"];
+const DIRS = ["up", "down", "left", "right"];
+const DIMS = [[0, "Off"], [30000, "30 seconds"], [60000, "1 minute"], [180000, "3 minutes"],
+              [600000, "10 minutes"], [1800000, "30 minutes"], [3600000, "1 hour"]];
+const DIAL_HINT = {
+  navigate: "Codex style: turn = previous / next option (Arrow Up / Down), click = Enter, hold 500 ms = open this configurator. " +
+            "The pad reports the dial to the daemon, so the keycodes below are ignored.",
+  keymap: "The pad sends these keycodes itself.",
+};
+const STICK_HINT = {
+  vendor: "The daemon reads the stick and sends a shortcut once per push (deadzone at half deflection, re-arms when released). " +
+          "Windows virtual-key codes, comma separated — e.g. 16, 9 for Shift+Tab. The joystick type / sectors below are ignored.",
+  keymap: "The pad sends its own joystick keycodes; the type / sectors below apply.",
+};
 const DEF_ZONE = { effect: "solid", brightness: 1, speed: 0.5, magic: 1, color: 0xffffff };
 // names lifted from the Work Louder Input keycode table, plus the vendor keys cm2d uses.
 const KEYCODES = ("KC_A KC_B KC_C KC_D KC_E KC_F KC_G KC_H KC_I KC_J KC_K KC_L KC_M KC_N KC_O KC_P KC_Q KC_R KC_S KC_T KC_U KC_V KC_W KC_X KC_Y KC_Z KC_1 KC_2 KC_3 KC_4 KC_5 KC_6 KC_7 KC_8 KC_9 KC_0 KC_ENT KC_ESC KC_BSPC KC_TAB KC_SPC KC_MINS KC_EQL KC_LBRC KC_RBRC KC_BSLS KC_NUHS KC_SCLN KC_QUOT KC_GRV KC_COMM KC_DOT KC_SLSH KC_CAPS KC_F1 KC_F2 KC_F3 KC_F4 KC_F5 KC_F6 KC_F7 KC_F8 KC_F9 KC_F10 KC_F11 KC_F12 KC_PSCR KC_SLCK KC_PAUS KC_INS KC_HOME KC_PGUP KC_DEL KC_END KC_PGDN KC_RGHT KC_LEFT KC_DOWN KC_UP KC_PSLS KC_PAST KC_PMNS KC_PPLS KC_PENT KC_P1 KC_P2 KC_P3 KC_P4 KC_P5 KC_P6 KC_P7 KC_P8 KC_P9 KC_P0 KC_PDOT KC_NUBS KC_APP KC_POWER KC_PEQL KC_F13 KC_F14 KC_F15 KC_F16 KC_F17 KC_F18 KC_F19 KC_F20 KC_F21 KC_F22 KC_F23 KC_F24 KC_HELP KC_MENU KC_SELECT KC_STOP KC_AGAIN KC_UNDO KC_CUT KC_COPY KC_PASTE KC_FIND KC_MUTE KC_VOLU KC_VOLD KC_MNXT KC_MPRV KC_MSTP KC_MPLY KC_MSEL KC_EJCT KC_LCAP KC_NLCK KC_LSCR KC_PCMM KC_RO KC_KANA KC_JYEN KC_HENK KC_MHEN KC_HAEN KC_HANJ KC_ERAS KC_SYSREQ KC_CANCEL KC_CLEAR KC_PRIOR KC_RETURN KC_SEPAR KC_OUT KC_OPER KC_CRSEL KC_EXSEL KC_LCTL KC_LSFT KC_LALT KC_LGUI KC_RCTL KC_RSFT KC_RALT KC_RGUI KC_PWR KC_SLEP KC_WAKE KC_EXEC KC_BRIU KC_BRID KC_MFFD KC_MRWD KC_NONE " +
@@ -206,12 +300,35 @@ const clone = (o) => (o == null ? o : JSON.parse(JSON.stringify(o)));
 function setStatus(msg, kind) { const el = $("status"); el.textContent = msg || ""; el.className = kind || ""; }
 function stateColor(s) { const c = cfg && cfg.colors && cfg.colors[s]; return hex(c == null ? (DEFC[s] == null ? 0x888888 : DEFC[s]) : c); }
 function short(kc) { return String(kc).replace(/^KV_OAI_/, "").replace(/^KC_/, ""); }
-function actionNote(kc) {
+function parseInts(s) {
+  const nums = String(s == null ? "" : s).split(",").map((x) => x.trim()).filter(Boolean).map(Number);
+  return nums.some((n) => !Number.isFinite(n)) ? null : nums;
+}
+function actIdOf(v) { const m = /^KV_OAI_(ACT\d\d)$/.exec(typeof v === "string" ? v : ""); return m ? m[1] : null; }
+// what the daemon does with this ACT key: a role from cfg.actions, else the cfg.actionKeys entry
+function edActKind(id) {
   const a = (cfg && cfg.actions) || {};
-  const m = /^KV_OAI_(ACT\d\d)$/.exec(String(kc));
-  if (!m) return "";
-  for (const k of ["approve", "reject", "talk"]) if (a[k] === m[1]) return " (" + k + ")";
-  return "";
+  for (const k of ["approve", "reject", "talk"]) if (a[k] === id) return k;
+  const v = cfg && cfg.actionKeys ? cfg.actionKeys[id] : null;
+  if (v && typeof v === "object") {
+    if (Array.isArray(v.chord)) return "chord";
+    if (typeof v.text === "string") return "text";
+    if (v.raise) return "raise";
+    if (v.open) return "open";
+  }
+  return "none";
+}
+function actionNote(kc) {
+  const id = actIdOf(kc);
+  if (!id) return "";
+  const kind = edActKind(id);
+  if (kind === "none") return "";
+  if (kind === "open") return " (open config)";
+  if (kind === "text") {
+    const t = String((cfg.actionKeys[id] || {}).text || "");
+    return " (text: " + (t.length > 10 ? t.slice(0, 10) + "…" : t) + ")";
+  }
+  return " (" + kind + ")";
 }
 function cellLabel(r, c) {
   const v = cfg && cfg.layout && cfg.layout[r] ? cfg.layout[r][c] : undefined;
@@ -294,6 +411,7 @@ function buildStatics() {
   $("keysZone").innerHTML = opts(["off", "keymap"]);
   const acts = ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10", "ACT11", "ACT12"];
   for (const id of ["actApprove", "actReject", "actTalk"]) $(id).innerHTML = opts(acts);
+  $("autoDimMs").innerHTML = DIMS.map((d) => '<option value="' + d[0] + '">' + d[1] + "</option>").join("");
   $("stateRows").innerHTML = STATES.map((s) =>
     '<div class="row"><label class="f"><span>' + s + '</span><input type="color" id="col_' + s + '"></label>' +
     '<label class="f"><span style="min-width:52px">ambient</span><select id="amb_' + s + '">' + opts(EFFECTS) + "</select></label>" +
@@ -349,10 +467,84 @@ function renderForms() {
     $("lz_" + z + "_speed").value = v.speed == null ? 0.5 : v.speed;
     for (const f of ["effect", "color", "brightness", "speed"]) $("lz_" + z + "_" + f).disabled = !lights;
   }
+  $("dialMode").value = cfg.dial === "navigate" ? "navigate" : "keymap";
+  const stick = cfg.stick || {};
+  $("stickMode").value = stick.mode === "vendor" ? "vendor" : "keymap";
+  for (const d of DIRS) $("stk_" + d).value = Array.isArray(stick[d]) ? stick[d].join(", ") : "";
+  const dim = String(cfg.autoDimMs == null ? 0 : cfg.autoDimMs);
+  if (!Array.prototype.some.call($("autoDimMs").options, (o) => o.value === dim)) $("autoDimMs").add(new Option(dim + " ms", dim));
+  $("autoDimMs").value = dim;
+  $("agentSource").value = cfg.agentSource === "sticky" ? "sticky" : "recent";
+  $("doubleTapMs").value = cfg.doubleTapMs == null ? 350 : cfg.doubleTapMs;
+  $("focusDowngrade").checked = !!cfg.focusDowngrade;
+  $("ambientMode").value = cfg.ambientMode === "codex" ? "codex" : "urgent";
+  syncGating();
+  renderEdAct();
   $("roHint").textContent = "read-only: port " + cfg.port + " · bind " + cfg.bind + " · resyncMs " + cfg.resyncMs + " · ttlMs " + cfg.ttlMs;
 }
 
+// greys out the fields the current dial / stick mode makes irrelevant
+function syncGating() {
+  const navi = $("dialMode").value === "navigate";
+  $("dialHint").textContent = DIAL_HINT[navi ? "navigate" : "keymap"];
+  $("dialKeymap").classList.toggle("off", navi);
+  $("encKeep").disabled = navi;
+  for (const id of ["encCw", "encCcw", "encPress"]) $(id).disabled = navi || $("encKeep").checked;
+  const vend = $("stickMode").value === "vendor";
+  $("stickHint").textContent = STICK_HINT[vend ? "vendor" : "keymap"];
+  $("stickVendor").hidden = !vend;
+  $("joyKeymap").classList.toggle("off", vend);
+  $("joyType").disabled = vend;
+  $("joySectors").disabled = vend;
+  for (const d of DIRS) $("stk_" + d).disabled = !vend;
+}
+
 /* ---------- editing ---------- */
+function edActVis(kind) {
+  $("edActChord").hidden = kind !== "chord";
+  $("edActText").hidden = kind !== "text";
+  $("edActEnterL").hidden = kind !== "text";
+  $("edActHint").textContent = kind === "chord" ? "Windows virtual-key codes, comma separated — e.g. 16, 9 for Shift+Tab."
+    : kind === "approve" || kind === "reject" || kind === "talk" ? "This role moves here; whichever key held it before loses it."
+    : "";
+}
+function renderEdAct() {
+  const id = cfg && edit ? actIdOf((normLayout()[edit.r] || [])[edit.c]) : null;
+  $("edActRow").hidden = !id;
+  if (!id) { $("edActHint").textContent = ""; return; }
+  const kind = edActKind(id);
+  const v = (cfg.actionKeys && cfg.actionKeys[id]) || {};
+  $("edAct").value = kind;
+  $("edActChord").value = Array.isArray(v.chord) ? v.chord.join(", ") : "";
+  $("edActText").value = typeof v.text === "string" ? v.text : "";
+  $("edActEnter").checked = !!v.enter;
+  edActVis(kind);
+}
+function commitEdAct() {
+  if (!cfg || !edit) return;
+  const id = actIdOf((normLayout()[edit.r] || [])[edit.c]);
+  if (!id) return;
+  const kind = $("edAct").value;
+  const roles = ["approve", "reject", "talk"];
+  const acts = Object.assign({}, cfg.actions);
+  for (const r of roles) if (acts[r] === id && r !== kind) delete acts[r];   // this key gave the role up
+  if (roles.indexOf(kind) >= 0) acts[kind] = id;                            // and takes it off its old key
+  const keys = Object.assign({}, cfg.actionKeys);
+  if (kind === "chord") {
+    const nums = parseInts($("edActChord").value);
+    if (!nums) { setStatus("chord: comma-separated integers only", "err"); return; }
+    setStatus(""); keys[id] = { chord: nums };
+  } else if (kind === "text") keys[id] = { text: $("edActText").value, enter: $("edActEnter").checked };
+  else if (kind === "raise") keys[id] = { raise: true };
+  else if (kind === "open") keys[id] = { open: "config" };
+  else delete keys[id];
+  cfg.actions = acts;
+  cfg.actionKeys = keys;
+  $("actApprove").value = acts.approve || "ACT07";
+  $("actReject").value = acts.reject || "ACT08";
+  $("actTalk").value = acts.talk || "ACT10";
+  touched();
+}
 function normLayout() {
   if (!Array.isArray(cfg.layout) || cfg.layout.length !== 4) cfg.layout = [[null, null], [null, null, null, null], [null, null, null, null], [null, null, null]];
   return cfg.layout;
@@ -378,6 +570,7 @@ function openEditor(r, c) {
   $("edVal").value = isChord ? v.join("+") : typeof v === "string" ? v : "";
   const pad = keymap && keymap.rows && keymap.rows[r] ? keymap.rows[r][c] : null;
   $("edHint").textContent = "on the pad now: " + (pad || "unknown") + " · empty box = keep the pad's value";
+  renderEdAct();
   $("editor").hidden = false;
   $("edVal").focus();
 }
@@ -390,6 +583,7 @@ function commitEditor() {
   else if (chord) { v = raw.split("+").map((s) => s.trim()).filter(Boolean); if (v.length === 1) v = v[0]; }
   else v = raw;
   normLayout()[edit.r][edit.c] = v;
+  renderEdAct();
   touched();
 }
 
@@ -453,6 +647,9 @@ function wire() {
   on("edChord", "change", commitEditor);
   on("edKeep", "click", () => { $("edVal").value = ""; $("edChord").checked = false; commitEditor(); });
   on("edClose", "click", () => { $("editor").hidden = true; edit = null; });
+  on("edAct", "change", () => { edActVis($("edAct").value); commitEdAct(); });
+  for (const id of ["edActChord", "edActText"]) on(id, "input", commitEdAct);
+  on("edActEnter", "change", commitEdAct);
 
   on("brightness", "input", () => { if (!cfg) return; cfg.brightness = Number($("brightness").value); $("brightnessV").textContent = cfg.brightness.toFixed(2); touched(); });
   on("holdMs", "input", () => { if (cfg) { cfg.holdMs = Number($("holdMs").value) || 0; touched(); } });
@@ -461,14 +658,18 @@ function wire() {
   on("talkMode", "change", () => { if (cfg) { cfg.talkMode = $("talkMode").value; touched(); } });
   on("talkKeys", "input", () => {
     if (!cfg) return;
-    const parts = $("talkKeys").value.split(",").map((s) => s.trim()).filter(Boolean);
-    const nums = parts.map((s) => Number(s));
-    if (nums.some((n) => !Number.isFinite(n))) { setStatus("talkKeys: comma-separated integers only", "err"); return; }
+    const nums = parseInts($("talkKeys").value);
+    if (!nums) { setStatus("talkKeys: comma-separated integers only", "err"); return; }
     setStatus(""); cfg.talkKeys = nums; touched();
   });
+  on("autoDimMs", "change", () => { if (cfg) { cfg.autoDimMs = Number($("autoDimMs").value) || 0; touched(); } });
+  on("agentSource", "change", () => { if (cfg) { cfg.agentSource = $("agentSource").value; touched(); } });
+  on("doubleTapMs", "input", () => { if (cfg) { cfg.doubleTapMs = Number($("doubleTapMs").value) || 0; touched(); } });
+  on("focusDowngrade", "change", () => { if (cfg) { cfg.focusDowngrade = $("focusDowngrade").checked; touched(); } });
+  on("ambientMode", "change", () => { if (cfg) { cfg.ambientMode = $("ambientMode").value; touched(); } });
   on("focusOnPress", "change", () => { if (cfg) { cfg.focusOnPress = $("focusOnPress").checked; touched(); } });
   for (const [id, key] of [["actApprove", "approve"], ["actReject", "reject"], ["actTalk", "talk"]])
-    on(id, "change", () => { if (!cfg) return; cfg.actions = Object.assign({}, cfg.actions); cfg.actions[key] = $(id).value; touched(); });
+    on(id, "change", () => { if (!cfg) return; cfg.actions = Object.assign({}, cfg.actions); cfg.actions[key] = $(id).value; renderEdAct(); touched(); });
 
   for (const s of STATES) {
     on("col_" + s, "input", () => { if (!cfg) return; cfg.colors = Object.assign({}, cfg.colors); cfg.colors[s] = int($("col_" + s).value); touched(); renderSessions(); });
@@ -485,10 +686,25 @@ function wire() {
     if (!cfg) return;
     if ($("encKeep").checked) cfg.encoders = null;
     else cfg.encoders = [[$("encCw").value.trim() || "KC_NONE", $("encCcw").value.trim() || "KC_NONE", $("encPress").value.trim() || "KC_NONE"]];
-    for (const id of ["encCw", "encCcw", "encPress"]) $(id).disabled = $("encKeep").checked;
+    syncGating();
     touched();
   };
   for (const id of ["encCw", "encCcw", "encPress"]) on(id, "input", encPush);
+  on("dialMode", "change", () => { if (!cfg) return; cfg.dial = $("dialMode").value; syncGating(); touched(); });
+  const stickPush = () => {
+    if (!cfg) return;
+    const out = { mode: $("stickMode").value };
+    for (const d of DIRS) {
+      const nums = parseInts($("stk_" + d).value);
+      if (!nums) { setStatus("stick " + d + ": comma-separated integers only", "err"); return; }
+      out[d] = nums;
+    }
+    setStatus("");
+    cfg.stick = Object.assign({}, cfg.stick, out);
+    syncGating(); touched();
+  };
+  on("stickMode", "change", stickPush);
+  for (const d of DIRS) on("stk_" + d, "input", stickPush);
   on("encKeep", "change", encPush);
 
   on("joyType", "change", () => {

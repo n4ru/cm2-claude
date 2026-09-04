@@ -24,6 +24,7 @@
  *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
  * State lives in %APPDATA%\cm2-claude (Windows) or ~/.config/cm2-claude; CM2_HOME overrides.
  *   node cm2d.js press AG00 [act]   simulate a pad key press (act 1) or release (act 0); loopback only
+ *   node cm2d.js stick 0.75 [d]     simulate a stick push at angle (turns, 0 = right) and distance
  *   node cm2d.js state        what the running daemon thinks
  *   node cm2d.js demo         walk fake sessions through every colour
  */
@@ -73,19 +74,38 @@ const DEFAULTS = {
     ["KV_OAI_ACT10", "KC_NONE", "KC_NONE"],
   ],
   // the rest of layer 1, written verbatim by setup-keys when set; null keeps what the pad has.
-  encoders: null,   // e.g. [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]  = dial clockwise, counter-clockwise, press
-  joystick: null,   // e.g. {"type": "JOYSTICK", "sectors": []} or {"type": "RADIAL", "sectors": [{"k": "KC_UP", "a1": 0.875, "a2": 0.125}, ...]}
+  encoders: null,   // used when dial = "keymap": [["KC_VOLU", "KC_VOLD", "KC_MPLY"]] = clockwise, counter-clockwise, press
+  joystick: null,   // used when stick.mode = "keymap": {"type": "JOYSTICK", "sectors": []} or {"type": "RADIAL", "sectors": [{"k": "KC_UP", "a1": 0.625, "a2": 0.875}, ...]}
   lights: null,     // the pad's own stored lighting when nothing drives it, e.g. {"backlight": {"effect": "solid", "brightness": 1, "speed": 0.5, "magic": 1, "color": 16777215}, "underglow": {...}}
+  // ---- the Codex Micro behaviours (from the ChatGPT app's own layout), all on by default
+  dial: "navigate",     // "navigate": turn = previous / next option (Arrow Up / Down), click = Enter, hold 500 ms = open the configurator;
+                        // using the dial puts the pad in "navigating" for 2 s: blue snake ring, AG00 red and acting as Escape. "keymap" = `encoders`
+  stick: { mode: "vendor", up: [0x10, 0x09], down: [0x11, 0x42], left: [0x12, 0x25], right: [0x12, 0x27] }, // Codex: plan mode, sidebar, back, forward.
+                        // vendor = the daemon reads the stick, fires once per push past half deflection, re-arms at rest. "keymap" = `joystick`
+  actionKeys: {},       // more vendor keys handled here, e.g. {"ACT09": {"chord": [17, 78]}, "ACT12": {"text": "Not sure, use your judgment", "enter": true}, "ACT11": {"raise": true}, "ACT06": {"open": "config"}}
+  autoDimMs: 180000,    // Codex: lights off after 3 min without a key, stick or status change; anything wakes them. 0 = never
+  agentSource: "recent",// Codex: the six most recently active sessions, most recent on AG00. "sticky": a session keeps its key until it ends
+  doubleTapMs: 350,     // second tap on the same agent key within this raises the Claude window; also the mic latch window
+  focusDowngrade: true, // Codex: the selected session's green (done, unread) turns white while the Claude window is focused
+  ambientMode: "urgent",// ring = most urgent state of any session. "codex": only the selected session working (blue snake), else off
 };
+/** Which encoders / joystick / lights setup-keys writes, honouring the dial and stick modes. The encoder order is the
+ *  one the Input app's ChatGPT preset uses (CC, CW, click), so the daemon's mapping matches the Codex feel. */
+const padExtras = (cfg) => ({
+  encoders: cfg.dial === "navigate" ? [["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]] : cfg.encoders,
+  joystick: cfg.stick && cfg.stick.mode === "vendor" ? { type: "VENDOR", sectors: [] } : cfg.joystick,
+  lights: cfg.lights,
+});
 
 function loadConfig(dir) {
   const f = path.join(dir, "config.json");
   const user = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
-  return { ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions } };
+  return mergeConfig(user);
 }
+const mergeConfig = (user) => ({ ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions }, stick: { ...DEFAULTS.stick, ...user.stick } });
 
-const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights"];
-const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions"];
+const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode"];
+const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions", "dial", "stick"];
 /** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
  *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
 function applyConfigPatch(dir, patch, cfg, lastKeymap) {
@@ -93,9 +113,9 @@ function applyConfigPatch(dir, patch, cfg, lastKeymap) {
   if (bad.length) throw new Error(`not editable: ${bad.join(", ")} (port and bind need a restart; edit config.json)`);
   const f = path.join(dir, "config.json");
   const user = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
-  for (const [k, v] of Object.entries(patch)) user[k] = ["colors", "ambient", "actions"].includes(k) && v && typeof v === "object" ? { ...(user[k] || {}), ...v } : v;
-  const next = { ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions } };
-  if (lastKeymap) agentKeymap(JSON.parse(JSON.stringify(lastKeymap)), next.layout, next.actions, next); // dry run: throws on a bad layout
+  for (const [k, v] of Object.entries(patch)) user[k] = ["colors", "ambient", "actions", "stick"].includes(k) && v && typeof v === "object" ? { ...(user[k] || {}), ...v } : v;
+  const next = mergeConfig(user);
+  if (lastKeymap) agentKeymap(JSON.parse(JSON.stringify(lastKeymap)), next.layout, next.actions, padExtras(next)); // dry run: throws on a bad layout
   fs.writeFileSync(f, JSON.stringify(user, null, 2) + "\n");
   Object.assign(cfg, next);
   return KEYMAP_KEYS.some((k) => k in patch);
@@ -146,17 +166,53 @@ function normalizeEvent(ev) {
 const inputAppRunning = () => { try { return process.platform === "win32" && execFileSync("tasklist", ["/FI", "IMAGENAME eq input.exe", "/NH"], { encoding: "utf8" }).includes("input.exe"); } catch { return false; } };
 // Windows keystroke injection for hold-to-talk. One persistent PowerShell child (the Add-Type compile costs ~1 s,
 // so it is started with the daemon, not on the first press); each stdin line is a chord of virtual-key codes.
-const KEYS_PS = `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class K{[DllImport("user32.dll")]public static extern void keybd_event(byte vk,byte sc,uint fl,UIntPtr ex);}'
-while($l=[Console]::In.ReadLine()){$p=$l.Split(" ");$m=$p[0];$v=@($p[1..($p.Length-1)]|%{[byte]$_});if($m -ne "u"){foreach($k in $v){[K]::keybd_event($k,0,0,[UIntPtr]::Zero)}};if($m -ne "d"){[array]::Reverse($v);foreach($k in $v){[K]::keybd_event($k,0,2,[UIntPtr]::Zero)}}}`;
-let keysProc = null;
+// Lines: "t|d|u <vk...>" tap / press / release a chord; "text <base64 utf8>" type it (SendKeys); "raise" bring the Claude
+// window to the front; "open <url>" default handler; "fg" answer "fg <process name>" of the foreground window on stdout.
+const KEYS_PS = `Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class K{[DllImport("user32.dll")]public static extern void keybd_event(byte vk,byte sc,uint fl,UIntPtr ex);[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int n);[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);}'
+while($l=[Console]::In.ReadLine()){$p=$l.Split(" ",2);$m=$p[0];$a=if($p.Length -gt 1){$p[1]}else{""}
+if($m -eq "text"){[System.Windows.Forms.SendKeys]::SendWait([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($a)));continue}
+if($m -eq "open"){Start-Process $a;continue}
+if($m -eq "raise"){$w=Get-Process claude -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0}|Select-Object -First 1;if($w){[K]::keybd_event(0x12,0,0,[UIntPtr]::Zero);[K]::keybd_event(0x12,0,2,[UIntPtr]::Zero);[void][K]::ShowWindow($w.MainWindowHandle,9);[void][K]::SetForegroundWindow($w.MainWindowHandle)};continue}
+if($m -eq "fg"){$h=[K]::GetForegroundWindow();$id=[uint32]0;[void][K]::GetWindowThreadProcessId($h,[ref]$id);$n=(Get-Process -Id $id -ErrorAction SilentlyContinue).ProcessName;[Console]::Out.WriteLine("fg "+$n);[Console]::Out.Flush();continue}
+if($a -eq ""){continue};$v=@($a.Split(" ")|%{[byte]$_});if($m -ne "u"){foreach($k in $v){[K]::keybd_event($k,0,0,[UIntPtr]::Zero)}};if($m -ne "d"){[array]::Reverse($v);foreach($k in $v){[K]::keybd_event($k,0,2,[UIntPtr]::Zero)}}}`;
+let keysProc = null; const fgWaiters = [];
+function injector() {
+  if (keysProc && keysProc.exitCode === null) return keysProc;
+  keysProc = spawn("powershell", ["-NoProfile", "-EncodedCommand", Buffer.from(KEYS_PS, "utf16le").toString("base64")], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  keysProc.on("error", (e) => log("keys:", e.message));
+  let buf = "";
+  keysProc.stdout.on("data", (d) => { buf += d; const lines = buf.split(/\r?\n/); buf = lines.pop(); for (const l of lines) { const m = /^fg (.*)$/.exec(l.trim()); if (m) { const w = fgWaiters.shift(); if (w) w(m[1]); } } });
+  return keysProc;
+}
+const inject = (line) => { if (process.platform !== "win32") return log("inject (no-op off Windows):", line.slice(0, 60)); injector().stdin.write(line + "\n"); };
 /** edge: "t" tap (press then release), "d" press and keep down, "u" release. null just warms the injector up. */
-function sendKeys(vks, edge = "t") {
-  if (process.platform !== "win32") return vks && log("sendKeys (no-op off Windows):", edge, vks.join("+"));
-  if (!keysProc || keysProc.exitCode !== null) {
-    keysProc = spawn("powershell", ["-NoProfile", "-EncodedCommand", Buffer.from(KEYS_PS, "utf16le").toString("base64")], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
-    keysProc.on("error", (e) => log("keys:", e.message));
+function sendKeys(vks, edge = "t") { if (!vks) { if (process.platform === "win32") injector(); return; } inject(`${edge} ${vks.join(" ")}`); }
+const injectText = (text, enter) => { inject("text " + Buffer.from(String(text).replace(/[+^%~(){}[\]]/g, (c) => "{" + c + "}")).toString("base64")); if (enter) sendKeys([0x0d]); };
+const raiseClaude = () => inject("raise");
+const openUrl = (u) => inject("open " + u);
+const foreground = (cb) => { if (process.platform !== "win32") return cb(""); fgWaiters.push(cb); inject("fg"); };
+const VK = { up: 0x26, down: 0x28, enter: 0x0d, esc: 0x1b };
+/** Codex's stick sectors (angle in turns, 0 = right). */
+const sectorOf = (a) => (a >= 0.625 && a < 0.875 ? "up" : a >= 0.125 && a < 0.375 ? "down" : a >= 0.375 && a < 0.625 ? "left" : "right");
+/** The Codex mic key, four states, one threshold: hold = record while held; tap, then tap again within t = latched
+ *  (keeps recording); any tap then stops it. `start`/`stop` are the only outputs. */
+class Ptt {
+  constructor(t, start, stop, now = Date.now) { this.t = t; this.start = start; this.stop = stop; this.now = now; this.state = "idle"; this.at = 0; this.timer = null; }
+  press() {
+    const n = this.now();
+    if (this.state === "idle") { this.state = "pressed"; this.at = n; this.start(); }
+    else if (this.state === "waiting") { clearTimeout(this.timer); this.state = "latched"; }
+    else if (this.state === "latched") { this.state = "suppressing"; this.at = n; this.stop(); }
+    else if (this.state === "suppressing" && n - this.at >= this.t) { this.state = "pressed"; this.at = n; this.start(); }
   }
-  if (vks) keysProc.stdin.write(`${edge} ${vks.join(" ")}\n`);
+  release() {
+    if (this.state !== "pressed") return;
+    const held = this.now() - this.at;
+    if (held >= this.t) { this.state = "idle"; this.stop(); return; }
+    this.state = "waiting";
+    this.timer = setTimeout(() => { if (this.state === "waiting") { this.state = "idle"; this.stop(); } }, this.t - held);
+  }
 }
 // The Claude desktop app stores one JSON per session under %APPDATA%\Claude\claude-code-sessions\<account>\<org>\local_*.json
 // carrying its own id (sessionId, "local_…"), the Claude Code id the hooks report (cliSessionId) and a title. Its
@@ -292,6 +348,14 @@ class Engine {
     if (s.slot === null) s.slot = this.freeSlot();
     return s;
   }
+  /** Codex's "recent" agent source: the six most recently active sessions, most recent on AG00; the rest have no key. */
+  reslot() {
+    if (this.cfg.agentSource !== "recent") return;
+    [...this.sessions.values()].sort((a, b) => b.seen - a.seen).forEach((s, i) => { s.slot = i < SLOTS ? i : null; });
+  }
+  slots() { return [...this.sessions.values()].map((s) => s.id + ":" + s.slot).sort().join(","); }
+  /** Codex: while the window is focused, the selected session's "done, unread" green is already seen. */
+  downgradeSelected() { const s = this.selected && this.sessions.get(this.selected); if (s && s.state === "unread") { s.state = "idle"; return true; } return false; }
   freeSlot() {
     const used = new Map([...this.sessions.values()].filter((s) => s.slot !== null).map((s) => [s.slot, s]));
     for (let i = 0; i < SLOTS; i++) if (!used.has(i)) return i;
@@ -310,7 +374,7 @@ class Engine {
       if (this.selected === id) this.selected = null;
       return this.sessions.delete(id);
     }
-    const before = this.sessions.get(id)?.slot ?? null; // read before session() may allocate (or steal) a slot
+    const before = this.slots(); // slots may move: allocation, eviction, or "recent" re-ordering
     const s = this.session(id, ev), was = s.state;
     switch (name) {
       case "SessionStart": if (ev.how_session_started !== "compact") s.state = "idle"; break;
@@ -323,9 +387,10 @@ class Engine {
         break;
       case "Stop": s.state = "unread"; break;
       case "StopFailure": s.state = "error"; break;
-      default: return before !== s.slot;
+      default: this.reslot(); return before !== this.slots();
     }
-    return was !== s.state || before !== s.slot || name === "SessionStart";
+    this.reslot();
+    return was !== s.state || before !== this.slots() || name === "SessionStart";
   }
   bySlot(slot) { return [...this.sessions.values()].find((s) => s.slot === slot); }
   /** Agent key pressed: select that session (breathing key) and acknowledge its done/error state. */
@@ -334,7 +399,7 @@ class Engine {
     if (!s) { this.selected = null; return true; }
     this.selected = this.selected === s.id ? null : s.id;
     if (s.state === "unread" || s.state === "error") s.state = "idle";
-    s.seen = this.now();
+    if (this.cfg.agentSource !== "recent") s.seen = this.now();   // in "recent" mode a press must not shuffle the keys
     return true;
   }
   sweep() {
@@ -344,7 +409,7 @@ class Engine {
     return changed;
   }
   toJSON() { return { selected: this.selected, sessions: [...this.sessions.values()] }; }
-  load(j) { if (!j || !Array.isArray(j.sessions)) return; this.sessions = new Map(j.sessions.map((s) => [s.id, s])); this.selected = j.selected ?? null; this.sweep(); }
+  load(j) { if (!j || !Array.isArray(j.sessions)) return; this.sessions = new Map(j.sessions.map((s) => [s.id, s])); this.selected = j.selected ?? null; this.sweep(); this.reslot(); }
   render() {
     const { colors, brightness } = this.cfg;
     const threads = Array.from({ length: SLOTS }, (_, i) => ({ id: i, c: 0, b: 0, e: 0, s: 0, sk: 0, sa: 0 }));
@@ -391,29 +456,47 @@ async function run(dir) {
   /** Does the pad differ from what the config says layer 1 should be? (config is the source of truth; null cells and null
    *  encoders/joystick/lights mean "whatever the pad has", so they never count as a difference) */
   const needsReprogram = (km) => {
-    try { const want = agentKeymap(JSON.parse(JSON.stringify(km)), cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }); return JSON.stringify(keymapSummary(want)) !== JSON.stringify(keymapSummary(km)); }
+    try { const want = agentKeymap(JSON.parse(JSON.stringify(km)), cfg.layout, cfg.actions, padExtras(cfg)); return JSON.stringify(keymapSummary(want)) !== JSON.stringify(keymapSummary(km)); }
     catch (e) { log("config does not fit this pad:", e.message); return false; }
   };
   /** Reprogram layer 1 from the config over the daemon's own connection (no pause needed: one writer). */
   async function applyLayout() {
     if (!pad) throw new Error("pad not connected");
     const km = await pad.readKeymap();
-    await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }));
+    await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, padExtras(cfg)));
     lastKeymap = km; keysZone = computeKeysZone(km); lastSent = "";
     log("keymap reprogrammed from config"); await push(true);
   }
-  let talkHeld = false;              // while the talk key is down the non-agent keys glow red and the ring runs Codex's green "recording" snake
+  let talkHeld = false;              // while recording the non-agent keys glow red and the ring runs Codex's green "recording" snake
   let flash = null;                  // {until, color}: the other keys show the newly selected session's colour for flashMs
   const VOICE_AMBIENT = { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: 0x2e8b57 };
+  let dialUntil = 0, dialTimer = null, encHold = null, encConsumed = false;   // "navigating": 2 s after the last dial event
+  let lastTap = null;                // {slot, at} for the agent-key double tap
+  let dimmed = false, lastActivity = Date.now();                              // auto-dim
+  let claudeFocused = false, stickArmed = true;
+  const dialActive = () => Date.now() < dialUntil;
+  const url = () => `http://127.0.0.1:${cfg.port}/`;
+  /** Anything a person does on the pad, or any status change, wakes the lights and restarts the auto-dim clock. */
+  function activity() {
+    lastActivity = Date.now();
+    if (dimmed) { dimmed = false; lastSent = ""; log("auto-dim: wake"); schedule(true); }
+  }
+  const OFF = { e: 0, b: 0, s: 0, m: 0, c: 0 };
 
   const respond = (res, obj, status) => { res.writeHead(status || (obj ? 200 : 204), { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
 
   async function push(force) {
-    if (!pad) return;
+    if (!pad || dimmed) return;
+    if (cfg.focusDowngrade && claudeFocused) engine.downgradeSelected();
     const { threads, top } = engine.render();
     if (flash && flash.until <= Date.now()) flash = null;
-    const ambient = talkHeld ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
+    const sel = engine.selected && engine.sessions.get(engine.selected);
+    let ambient = talkHeld ? VOICE_AMBIENT
+      : dialActive() ? { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: cfg.colors.working }
+      : cfg.ambientMode === "codex" ? (sel && sel.state === "working" ? { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: cfg.colors.working } : flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : OFF)
+      : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
+    if (dialActive()) threads[0] = { id: 0, c: cfg.colors.error, b: cfg.brightness, e: 1, s: 0, sk: 0, sa: 0 };   // AG00 is Escape while navigating
     const keys = talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : keysZone;
     const payload = JSON.stringify([threads, ambient, keys]);
     if (!force && payload === lastSent) return;
@@ -456,37 +539,77 @@ async function run(dir) {
     log(`${which} -> ${id.slice(0, 8)}`);
     schedule();
   }
+  /** Recording on/off: the shortcut first (the mic matters more than the light), then one RPC for the light. */
+  function setTalk(on) {
+    if (on === talkHeld) return;
+    talkHeld = on;
+    sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (on ? "d" : "u") : "t");
+    log(`talk: ${on ? "listening" : "stop"}`);
+    if (pad && !dimmed) {
+      const { top } = engine.render();
+      pad.setZones(on ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), on ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
+      lastSent = "";
+    }
+  }
+  const ptt = new Ptt(cfg.doubleTapMs, () => setTalk(true), () => setTalk(false));
+  /** Dial as a cursor (Codex "composer-navigation"): clockwise = previous option, counter-clockwise = next, click = Enter,
+   *  hold 500 ms = open the configurator. Any use makes the pad "navigating" for 2 s (blue snake, AG00 red = Escape). */
+  function dial(key, act) {
+    dialUntil = Date.now() + 2000; clearTimeout(dialTimer); dialTimer = setTimeout(() => schedule(), 2050);
+    if (key === "ENC_CW") { sendKeys([VK.up]); log("dial: previous (Up)"); }
+    else if (key === "ENC_CC") { sendKeys([VK.down]); log("dial: next (Down)"); }
+    else if (key === "ENC_CLK") {
+      if (act === 1) { encConsumed = false; clearTimeout(encHold); encHold = setTimeout(() => { encConsumed = true; openUrl(url()); log("dial held: configurator"); }, 500); }
+      else if (act === 0) { clearTimeout(encHold); if (!encConsumed) sendKeys([VK.enter]); }
+    }
+    schedule();
+  }
+  function agentKey(slot) {
+    if (dialActive() && slot === 0) { sendKeys([VK.esc]); log("AG00 while navigating -> Escape"); return; }
+    const now = Date.now();
+    if (lastTap && lastTap.slot === slot && now - lastTap.at <= cfg.doubleTapMs) { lastTap = null; raiseClaude(); log(`key AG0${slot} double tap -> raise Claude`); return; }
+    lastTap = { slot, at: now };
+    const before = engine.selected;
+    engine.press(slot);
+    const s = engine.selected && engine.sessions.get(engine.selected);
+    log(`key AG0${slot} -> select ${s ? s.id.slice(0, 8) : "none"}`);
+    if (s && engine.selected !== before) {
+      if (cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
+      if (cfg.focusOnPress) { const d = desktopSession(s.id); if (d) { openInClaude(d.localId); log(`  opening "${d.title}" in Claude`); } else log("  no desktop session found for it"); }
+    }
+    schedule();
+  }
+  function doAction(key, a) {
+    if (a.chord) { sendKeys(a.chord); log(`${key}: chord ${a.chord.join("+")}`); }
+    else if (a.text !== undefined) { injectText(a.text, a.enter); log(`${key}: typed "${String(a.text).slice(0, 30)}"${a.enter ? " + Enter" : ""}`); }
+    else if (a.raise) { raiseClaude(); log(`${key}: raise Claude`); }
+    else if (a.open) { openUrl(url()); log(`${key}: open configurator`); }
+  }
   function onKey({ key, act } = {}) {
     try {
-      if (key === cfg.actions.talk) {
-        if (act !== 1 && act !== 0) return;
-        if ((act === 1) === talkHeld) return;                       // auto-repeat while held, or a stray release
-        talkHeld = act === 1;
-        sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (talkHeld ? "d" : "u") : "t");   // shortcut first: the mic matters more than the light
-        log(`talk: ${talkHeld ? "listening" : "stop"}`);
-        if (pad) {                                                  // one RPC for the light instead of the full two-command push
-          const { top } = engine.render();
-          pad.setZones(talkHeld ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
-          lastSent = "";
-        }
-        return;
-      }
+      activity();
+      if (key === cfg.actions.talk) { if (act === 1) ptt.press(); else if (act === 0) ptt.release(); return; }
+      if (/^ENC_/.test(key || "")) return dial(key, act);
       if (act !== 1) return;
       const m = /^AG0([0-5])$/.exec(key || "");
-      if (m) {
-        const before = engine.selected;
-        engine.press(+m[1]);
-        const s = engine.selected && engine.sessions.get(engine.selected);
-        log(`key ${key} -> select ${s ? s.id.slice(0, 8) : "none"}`);
-        if (s && engine.selected !== before) {
-          if (cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
-          if (cfg.focusOnPress) { const d = desktopSession(s.id); if (d) { openInClaude(d.localId); log(`  opening "${d.title}" in Claude`); } else log("  no desktop session found for it"); }
-        }
-        return schedule();
-      }
+      if (m) return agentKey(+m[1]);
       if (key === cfg.actions.approve) return answer("approve");
       if (key === cfg.actions.reject) return answer("reject");
+      const a = cfg.actionKeys && cfg.actionKeys[key];
+      if (a) return doAction(key, a);
     } catch (e) { log("key handler:", e.message); }
+  }
+  /** The stick in vendor mode: one shortcut per push past half deflection, re-armed once it returns to rest. */
+  function stick({ a, d } = {}) {
+    try {
+      if (typeof d !== "number") return;
+      if (d > 0.1) activity();
+      if (d <= 0.1) { stickArmed = true; return; }
+      if (!stickArmed || d < 0.5 || !cfg.stick || cfg.stick.mode !== "vendor") return;
+      stickArmed = false;
+      const dir = sectorOf(a), vks = cfg.stick[dir];
+      if (vks && vks.length) { sendKeys(vks); log(`stick ${dir}`); }
+    } catch (e) { log("stick handler:", e.message); }
   }
 
   const server = http.createServer((req, res) => {
@@ -505,7 +628,7 @@ async function run(dir) {
       if (req.method === "POST" && (req.url === "/key" || req.url === "/quit")) {                     // control endpoints: this machine only
         if (!loopback(req)) { res.writeHead(403); return res.end(); }
         if (req.url === "/quit") { respond(res); return stop(); }
-        onKey(ev); return respond(res);                                                              // simulate a pad press (`cm2d press`)
+        if (ev.joystick) stick(ev.joystick); else onKey(ev); return respond(res);                    // simulate a pad press / stick push (`cm2d press`, `cm2d stick`)
       }
       if (req.method === "POST" && req.url === "/config") {                                     // the GUI's Apply
         (async () => {
@@ -521,6 +644,7 @@ async function run(dir) {
       }
       if (req.method !== "POST" || req.url !== "/hook") { res.writeHead(404); return res.end(); }
       const changed = engine.handle(ev);
+      if (changed) activity();
       if (changed) { log(`${ev.hook_event_name}${ev.notification_type ? "/" + ev.notification_type : ""} ${String(ev.session_id).slice(0, 8)} -> ${engine.sessions.get(ev.session_id)?.state ?? "gone"} slot ${engine.sessions.get(ev.session_id)?.slot ?? "-"}`); schedule(); }
       if (ev.hook_event_name !== "PermissionRequest" || !cfg.holdMs || !pad || !ev.session_id) return respond(res);
       // hold the prompt open for the pad; the hook script's curl timeout must exceed holdMs
@@ -536,7 +660,17 @@ async function run(dir) {
   server.listen(cfg.port, cfg.bind, () => log(`listening on ${cfg.bind}:${cfg.port}`));
 
   let tick = 0;
-  if (cfg.actions.talk) sendKeys(null); // warm up the injector so the first hold-to-talk is instant
+  if (process.platform === "win32") sendKeys(null); // warm up the injector so the first hold-to-talk is instant
+  setInterval(async () => {                                        // auto-dim: Codex sends all-off after autoDimMs without input or change
+    if (cfg.autoDimMs && pad && !dimmed && Date.now() - lastActivity >= cfg.autoDimMs) {
+      dimmed = true; log("auto-dim: lights off");
+      try { await pad.setThreads(Array.from({ length: SLOTS }, (_, i) => ({ id: i, ...OFF, sk: 0, sa: 0 }))); await pad.setZones(OFF, OFF); } catch (e) { log("dim failed:", e.message); }
+    }
+  }, 5000);
+  if (process.platform === "win32") setInterval(() => foreground((name) => {   // Codex: looking at the window counts as reading
+    const f = name === "claude"; if (f === claudeFocused) return; claudeFocused = f;
+    if (f && cfg.focusDowngrade && engine.downgradeSelected()) { log("Claude focused: selected session read"); schedule(); }
+  }), 1000);
   setInterval(async () => {
     if (engine.sweep()) schedule();
     if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); const km = await pad.readKeymap(); device.agentKeys = await checkAgentKeys(km, st); lastKeymap = km; Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
@@ -567,7 +701,7 @@ async function run(dir) {
       // a config saved while the pad was away (or changed by Input) lands here: reconcile once per connect
       if (km && needsReprogram(km)) { if (inputAppRunning()) log("pad differs from config but the Input app is running; not reprogramming"); else { log("pad differs from config; reprogramming"); await applyLayout(); } }
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
-      pad.on("key", onKey);
+      pad.on("key", onKey); pad.on("joystick", stick);
       lastSent = ""; pushFails = 0; await push(true);
       await gone;
     } catch (e) { log("connect failed:", e.message); }
@@ -607,8 +741,7 @@ function agentKeymap(km, layout, actions, extras = {}) {
 // ---------------------------------------------------------------- windows autostart
 /** Hidden launcher for the logon task. The whole command is wrapped in one extra pair of quotes:
  *  `cmd /c "..."` strips the first and last quote it sees, which would otherwise break the quoted node path. */
-function writeLauncher(dir) {
-  const vbs = path.join(__dirname, "cm2d.vbs");                       // next to the code; the log goes to the state folder
+function writeLauncher(dir, vbs = path.join(__dirname, "cm2d.vbs")) {   // next to the code; the log goes to the state folder
   const cmd = `cmd /c ""${process.execPath}" "${__filename}" run >> "${path.join(dir, "cm2d.log")}" 2>&1"`;
   fs.writeFileSync(vbs, `CreateObject("WScript.Shell").Run "${cmd.replace(/"/g, '""')}", 0, False\r\n`);
   return vbs;
@@ -634,6 +767,7 @@ async function main(argv) {
     case "stop": return stopDaemon(dir, cfg.port);
     case "restart": await stopDaemon(dir, cfg.port); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
     case "press": return post("/key", { key: argv[1], act: argv[2] === undefined ? 1 : +argv[2] });
+    case "stick": return post("/key", { joystick: { a: +argv[1], d: argv[2] === undefined ? 1 : +argv[2] } });
     case "install": case "uninstall": return taskCmd(dir, cmd);
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
     case "demo": {
@@ -659,7 +793,7 @@ async function main(argv) {
         const km = await pad.readKeymap();
         const bak = path.join(dir, `keymap.backup-${Date.now()}.json`);
         fs.writeFileSync(bak, JSON.stringify(km, null, 2));
-        await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }));
+        await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, padExtras(cfg)));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
       default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|press KEY|state|demo"); process.exitCode = 2;
@@ -670,5 +804,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, padExtras, sectorOf, Ptt, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

@@ -1,7 +1,8 @@
 "use strict";
 // No hardware needed: framing bytes, state transitions, slot eviction, zone conversion, keymap rewrite.
 const assert = require("assert");
-const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = require("./cm2d.js");
+const { frame, Engine, zone, agentKeymap, readPid, alive, padExtras, sectorOf, Ptt, EFFECT, DEFAULTS } = require("./cm2d.js");
+const STICKY = { ...DEFAULTS, agentSource: "sticky" };
 
 // framing: 64-byte reports, [6][2][len][payload], long lines split at 61, non-ASCII escaped
 {
@@ -17,7 +18,7 @@ const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = r
 
 // engine: Codex-style derivation + selection + eviction
 {
-  let t = 0; const e = new Engine(DEFAULTS, () => t);
+  let t = 0; const e = new Engine(STICKY, () => t);
   const ev = (session_id, hook_event_name, extra = {}) => e.handle({ session_id, hook_event_name, cwd: "/p/" + session_id, ...extra });
   assert.equal(ev("a", "SessionStart"), true); assert.equal(e.sessions.get("a").slot, 0);
   assert.equal(ev("z", "Notification", { notification_type: "idle_prompt" }), true); // ignored type, but it just got a key: re-render
@@ -52,11 +53,48 @@ const { frame, Engine, zone, agentKeymap, readPid, alive, EFFECT, DEFAULTS } = r
   t++; ev("i", "UserPromptSubmit"); assert.notEqual(e.sessions.get("i").slot, null);            // still gets a key: stalest busy one gives way
   assert.equal([...e.sessions.values()].filter((s) => s.slot !== null).length, 6);
   // round-trips through JSON (restart persistence), then the ttl sweep
-  const e2 = new Engine(DEFAULTS, () => t); e2.load(JSON.parse(JSON.stringify(e)));
+  const e2 = new Engine(STICKY, () => t); e2.load(JSON.parse(JSON.stringify(e)));
   assert.equal(e2.sessions.size, e.sessions.size); assert.equal(e2.selected, e.selected); assert.deepEqual(e2.render(), e.render());
   e2.load(null); e2.load({ sessions: "junk" }); assert.equal(e2.sessions.size, e.sessions.size);   // bad files are ignored
   t += DEFAULTS.ttlMs + 1; assert.equal(e.sweep(), true); assert.equal(e.sessions.size, 0);
 }
+
+// "recent" agent source (Codex default): most recently active session on AG00, keys re-sort on every event, presses don't shuffle
+{
+  let t = 0; const e = new Engine(DEFAULTS, () => t);
+  const ev = (id, name) => e.handle({ session_id: id, hook_event_name: name });
+  for (const id of ["a", "b", "c"]) { t++; ev(id, "SessionStart"); }
+  assert.deepEqual(["a", "b", "c"].map((id) => e.sessions.get(id).slot), [2, 1, 0]);      // c is newest
+  t++; assert.equal(ev("a", "UserPromptSubmit"), true); assert.equal(e.sessions.get("a").slot, 0); // a moves to the front
+  e.press(1); assert.equal(e.selected, "c"); assert.equal(e.sessions.get("c").slot, 1);   // a press selects but does not re-order
+  for (const id of ["d", "e", "f", "g"]) { t++; ev(id, "SessionStart"); }
+  assert.equal(e.sessions.get("b").slot, null); assert.equal(e.sessions.get("g").slot, 0);  // seventh session: stalest loses its key
+  const before = e.render(); e.selected = "a"; e.sessions.get("a").state = "unread";
+  assert.equal(e.downgradeSelected(), true); assert.equal(e.sessions.get("a").state, "idle"); assert.equal(e.downgradeSelected(), false);
+  void before;
+}
+
+// stick sectors: Codex's table, angle in turns with 0 = right
+assert.deepEqual([0, 0.2, 0.5, 0.75, 0.9, 0.12, 0.13].map(sectorOf), ["right", "down", "left", "up", "right", "right", "down"]);
+
+// mic key state machine: hold = talk while held; tap + tap = latched; tap = stop; taps inside the window are ignored
+{
+  let now = 0, out = []; const p = new Ptt(350, () => out.push("start"), () => out.push("stop"), () => now);
+  p.press(); now += 600; p.release(); assert.deepEqual(out, ["start", "stop"]); assert.equal(p.state, "idle");   // classic hold
+  out = []; p.press(); now += 100; p.release(); assert.deepEqual(out, ["start"]); assert.equal(p.state, "waiting");
+  now += 100; p.press(); assert.equal(p.state, "latched"); assert.deepEqual(out, ["start"]);                       // second tap latches
+  now += 5000; p.release(); assert.equal(p.state, "latched");
+  p.press(); assert.deepEqual(out, ["start", "stop"]); assert.equal(p.state, "suppressing");                        // next tap stops
+  now += 100; p.press(); assert.equal(p.state, "suppressing");                                                     // too soon: ignored
+  now += 400; p.press(); assert.equal(p.state, "pressed"); assert.deepEqual(out, ["start", "stop", "start"]);
+  now += 400; p.release(); assert.equal(p.state, "idle");
+}
+
+// pad extras follow the dial and stick modes
+assert.deepEqual(padExtras(DEFAULTS).encoders, [["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]]);
+assert.deepEqual(padExtras(DEFAULTS).joystick, { type: "VENDOR", sectors: [] });
+assert.deepEqual(padExtras({ ...DEFAULTS, dial: "keymap", stick: { mode: "keymap" }, encoders: [["KC_A", "KC_B", "KC_C"]], joystick: null }).encoders, [["KC_A", "KC_B", "KC_C"]]);
+assert.equal(padExtras({ ...DEFAULTS, dial: "keymap", stick: { mode: "keymap" }, joystick: null }).joystick, null);
 
 // zone conversion mirrors the vendor app's {e,b,s,m,c} sides
 assert.deepEqual(zone({ effect: "rainbow", brightness: 1, speed: 0.55, magic: 1, color: 16777215 }), { e: 3, b: 1, s: 0.55, m: 1, c: 16777215 });
@@ -99,7 +137,8 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
 // launcher: the command handed to cmd /c must be wrapped in one outer pair of quotes (cmd strips the first and last)
 {
   const { writeLauncher } = require("./cm2d.js"), os = require("os");
-  const vbs = require("fs").readFileSync(writeLauncher(os.tmpdir()), "utf8");
+  const tmp = require("fs").mkdtempSync(require("path").join(os.tmpdir(), "cm2vbs-"));
+  const vbs = require("fs").readFileSync(writeLauncher(tmp, require("path").join(tmp, "cm2d.vbs")), "utf8");   // never the real launcher
   const cmd = /Run "(.*)", 0, False/.exec(vbs)[1].replace(/""/g, '"');
   assert.ok(cmd.startsWith('cmd /c ""') && cmd.endsWith('2>&1"'), cmd);
 }

@@ -17,6 +17,7 @@ row 4   [TALK] [ .. ] [ .. ]                 body ring = most urgent state acros
 - [Install](#install)
 - [The configurator](#the-configurator)
 - [What the keys do](#what-the-keys-do)
+- [The Codex behaviours](#the-codex-behaviours)
 - [The state machine](#the-state-machine)
 - [Hold-to-talk](#hold-to-talk)
 - [Config reference](#config-reference)
@@ -175,6 +176,26 @@ modifiers held, last key clicked, released), a `KV_OAI_*` action or agent key,
 or `null` to keep whatever the pad has. Macros cm2d made are regenerated each
 time; macros you built elsewhere are left alone.
 
+## The Codex behaviours
+
+Everything the ChatGPT app does with the Codex Micro (from the freemicro
+project's teardown of that app) is reproduced, minus its onboarding animation and
+mini-game. All of it is on by default and switchable in the configurator.
+
+| Codex | here |
+|---|---|
+| **Dial** turns move the highlight (Arrow Up / Down), click is Enter, hold 500 ms opens settings; using it puts the pad in "navigating": blue snake ring, and AG00 turns red and acts as Escape | `dial: "navigate"`: identical, hold opens this configurator; "navigating" lasts 2 s after the last dial event (Codex knows when a menu is open; we don't). `dial: "keymap"` restores plain keycodes from `encoders` |
+| **Stick** fires one command per push past half deflection, re-arms at rest; up plan mode, down sidebar, left back, right forward | `stick.mode: "vendor"` with the same deadzones and edge trigger; each direction is a chord of virtual-key codes, default Shift+Tab, Ctrl+B, Alt+Left, Alt+Right. `"keymap"` restores `joystick` |
+| **Agent keys** show the six most recently updated threads, most recent first | `agentSource: "recent"` (keys re-sort as sessions become active) or `"sticky"` (a session keeps its key) |
+| single tap opens the thread in the background, double tap within 350 ms also raises the window | tap selects and acknowledges (and fires the gated deep link); double tap within `doubleTapMs` raises the Claude window |
+| the selected thread's green clears when the window is focused | `focusDowngrade`: the daemon polls the foreground window; when it is Claude, the selected session's green turns white |
+| ring: only the selected thread working (blue snake), a 4 s flash on selection change, voice states | `ambientMode: "codex"` does exactly that; `"urgent"` (default) shows the most urgent state of any session instead. Recording = green snake either way |
+| key backlight off; brightness 0–100 | `keys: "off"`, `brightness` |
+| **auto-dim** after 3 min without input or change; any key, stick past 10 %, or status change wakes it | `autoDimMs` (0 = never); same wake rules |
+| **MIC**: hold to talk; tap then tap again within 350 ms latches recording; any tap stops | the TALK key runs the same four-state machine on `doubleTapMs` |
+| 37 keycaps with built-in commands; YOLO/YEET type into the composer | `actionKeys`: any action key can send a chord, type text (with or without Enter), raise the Claude window, or open the configurator |
+| writes coalesced, identical payloads skipped, blank on quit, reconnect backoff, battery polled | same (80 ms coalescing, dedupe, blank on quit, reconnect loop, status every 2 min) |
+
 ## The state machine
 
 One record per Claude Code session, keyed by `session_id`, driven only by hook
@@ -236,7 +257,9 @@ Codex; `"keymap"` for the pad's stored backlight; or an explicit
 `{effect,color,brightness}`), `actions` (which ACT keys are approve, reject and
 talk), `talkKeys`/`talkMode`, `focusOnPress`, `flashMs`, `layout`, `encoders`,
 `joystick`, `lights` (what `setup-keys` writes: the 13 keys, the dial, the
-joystick and the pad's own stored lighting; null keeps what the pad has).
+joystick and the pad's own stored lighting; null keeps what the pad has),
+`dial`, `stick`, `actionKeys`, `autoDimMs`, `agentSource`, `doubleTapMs`,
+`focusDowngrade`, `ambientMode` (the [Codex behaviours](#the-codex-behaviours)).
 
 ## Caveats
 
