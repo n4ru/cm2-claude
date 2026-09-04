@@ -10,6 +10,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ensure-daemon.sh",
+            "async": true,
+            "timeout": 180
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -121,4 +131,4 @@
       }
     ]
   }
-}
+}\n

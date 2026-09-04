@@ -135,4 +135,8 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   assert.throws(() => applyConfigPatch(dir, { layout: [["KC_A"]] }, cfg, km), /shape/);                       // rejected before saving
   assert.equal(JSON.parse(fs.readFileSync(p.join(dir, "config.json"), "utf8")).layout, undefined);
   assert.throws(() => applyConfigPatch(dir, { actions: { approve: "ACT06" } }, cfg, km), /ACT06/); }
+// state folder: CM2_HOME wins, is created, and old files next to the code are copied in once
+{ const os = require("os"), fs = require("fs"), p = require("path"), { homeDir } = require("./cm2d.js");
+  const h = p.join(fs.mkdtempSync(p.join(os.tmpdir(), "cm2home-")), "state"); process.env.CM2_HOME = h;
+  assert.equal(homeDir(), h); assert.ok(fs.existsSync(h)); delete process.env.CM2_HOME; }
 console.log("ok");

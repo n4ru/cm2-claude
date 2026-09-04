@@ -22,6 +22,7 @@
  *   node cm2d.js install      autostart at logon (Windows scheduled task) + start now
  *   node cm2d.js uninstall
  *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
+ * State lives in %APPDATA%\cm2-claude (Windows) or ~/.config/cm2-claude; CM2_HOME overrides.
  *   node cm2d.js press AG00 [act]   simulate a pad key press (act 1) or release (act 0); loopback only
  *   node cm2d.js state        what the running daemon thinks
  *   node cm2d.js demo         walk fake sessions through every colour
@@ -98,6 +99,15 @@ function applyConfigPatch(dir, patch, cfg, lastKeymap) {
   fs.writeFileSync(f, JSON.stringify(user, null, 2) + "\n");
   Object.assign(cfg, next);
   return KEYMAP_KEYS.some((k) => k in patch);
+}
+/** State (config.json, sessions.json, pidfile, log, keymap backups) lives in a per-user folder, not next to the code:
+ *  the code may be a plugin cache directory that is replaced on every update. CM2_HOME overrides. Files found next to
+ *  the code from older installs are migrated once. */
+function homeDir() {
+  const home = process.env.CM2_HOME || (process.platform === "win32" && process.env.APPDATA ? path.join(process.env.APPDATA, "cm2-claude") : path.join(process.env.HOME || process.env.USERPROFILE || __dirname, ".config", "cm2-claude"));
+  fs.mkdirSync(home, { recursive: true });
+  for (const f of fs.readdirSync(__dirname)) if ((f === "config.json" || f === "sessions.json" || /^keymap\..*\.json$/.test(f)) && !fs.existsSync(path.join(home, f))) { try { fs.copyFileSync(path.join(__dirname, f), path.join(home, f)); } catch { /* read-only code dir: fine */ } }
+  return home;
 }
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -484,7 +494,7 @@ async function run(dir) {
     req.on("data", (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on("end", () => {
       if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) {
-        return fs.readFile(path.join(dir, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
+        return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
       if (req.method === "GET" && req.url === "/state") {
@@ -598,8 +608,8 @@ function agentKeymap(km, layout, actions, extras = {}) {
 /** Hidden launcher for the logon task. The whole command is wrapped in one extra pair of quotes:
  *  `cmd /c "..."` strips the first and last quote it sees, which would otherwise break the quoted node path. */
 function writeLauncher(dir) {
-  const vbs = path.join(dir, "cm2d.vbs");
-  const cmd = `cmd /c ""${process.execPath}" "${path.join(dir, "cm2d.js")}" run >> "${path.join(dir, "cm2d.log")}" 2>&1"`;
+  const vbs = path.join(__dirname, "cm2d.vbs");                       // next to the code; the log goes to the state folder
+  const cmd = `cmd /c ""${process.execPath}" "${__filename}" run >> "${path.join(dir, "cm2d.log")}" 2>&1"`;
   fs.writeFileSync(vbs, `CreateObject("WScript.Shell").Run "${cmd.replace(/"/g, '""')}", 0, False\r\n`);
   return vbs;
 }
@@ -616,7 +626,7 @@ function taskCmd(dir, action) {
 
 // ---------------------------------------------------------------- cli
 async function main(argv) {
-  const dir = __dirname, cmd = argv[0], cfg = loadConfig(dir);
+  const dir = homeDir(), cmd = argv[0], cfg = loadConfig(dir);
   const get = (u) => new Promise((ok, no) => http.get(`http://127.0.0.1:${cfg.port}${u}`, (r) => { let b = ""; r.on("data", (c) => (b += c)); r.on("end", () => ok(b)); }).on("error", no));
   const post = (u, o) => new Promise((ok, no) => { const r = http.request(`http://127.0.0.1:${cfg.port}${u}`, { method: "POST", headers: { "Content-Type": "application/json" } }, (res) => { res.resume(); res.on("end", ok); }); r.on("error", no); r.end(JSON.stringify(o)); });
   switch (cmd) {
@@ -660,5 +670,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

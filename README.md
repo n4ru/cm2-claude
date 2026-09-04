@@ -45,7 +45,17 @@ firmware 0.6 is what put the `v.oai.*` methods on every Creator Micro 2).
 
 ## Install
 
-**On the machine with the pad** (Windows, Node 18+):
+**On the machine with the pad** (Windows, Node 18+), there are two ways to run
+the daemon, and they coexist:
+
+*Started by the plugin.* If Claude Code itself runs on that machine (the desktop
+app's native sessions, or the CLI), the plugin's `SessionStart` hook starts cm2d
+from the plugin's own copy of the daemon whenever a session starts and it isn't
+already running (first run does the `npm install`). Nothing else to set up. Set
+`CM2_NO_DAEMON=1` to opt out.
+
+*Started at login.* If your sessions run elsewhere (SSH, WSL) and the pad's
+machine only hosts the daemon, install it as a logon task:
 
 ```bash
 scp -r daemon desktop:C:/Users/user/cm2-claude/
@@ -56,9 +66,12 @@ ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js install"       #
 ssh desktop "cd C:\Users\user\cm2-claude\daemon && node cm2d.js restart"       # after editing config.json or copying a new cm2d.js
 ```
 
-The daemon keeps a pidfile, so starting a new instance (the task, or `restart`)
-retires the old one instead of racing it for the port. Close the Work Louder
-Input app and stop it launching at login (see [Caveats](#caveats)).
+Either way the daemon's state (config, sessions, pidfile, log, keymap backups)
+lives in `%APPDATA%\cm2-claude` on Windows or `~/.config/cm2-claude` elsewhere
+(`CM2_HOME` overrides), so plugin updates never lose your configuration. The
+pidfile means a new instance retires the old one instead of racing it for the
+port. Close the Work Louder Input app and stop it launching at login (see
+[Caveats](#caveats)).
 
 **On every machine that runs Claude Code:**
 
@@ -79,12 +92,25 @@ daemon. On Windows the hook script runs under Git Bash, which Claude Code needs
 anyway. A local-copy marketplace does not update itself: re-copy, then
 `claude plugin marketplace update cm2-claude`.
 
-The hook script posts to `CM2_URL` if set in your environment, otherwise to the
-desktop's Tailscale address. From WSL use that same address; the WSL gateway
-does not reach the daemon. `hooks/install-hooks.sh` is the no-plugin fallback
-(writes the hooks into `~/.claude/settings.json`; `--remove` takes them out).
-Sessions already running when the plugin is installed keep the hooks they
-started with; new sessions use the plugin.
+**Configuring the plugin.** Claude Code plugins have no settings page, and this
+one needs exactly one setting: where the daemon is. The hook script uses
+`CM2_URL` from the environment if set, else the single line in
+`~/.config/cm2-claude/url` (for example `http://100.124.22.74:7777`), else
+`http://127.0.0.1:7777`. Write that file on every machine whose sessions should
+reach a daemon elsewhere; on the pad's own machine the default is right.
+Everything else (keys, colours, hold time, talk key) is configured in the
+daemon's own page, not in the plugin. `/cm2` prints which address it is using.
+From WSL use the desktop's Tailscale address; the WSL gateway does not reach the
+daemon. `hooks/install-hooks.sh` is the no-plugin fallback (writes the hooks into
+`~/.claude/settings.json`; `--remove` takes them out). Sessions already running
+when the plugin is installed keep the hooks they started with; new sessions use
+the plugin.
+
+Android: Claude Code runs there only under Termux, where the plugin works like
+anywhere else, so a Termux session lights the pad. The daemon cannot run on
+Android without a native app: over USB an app can claim the pad's HID interface
+without root; over Bluetooth, Android hides the HID service from non-system
+apps.
 
 Check: `/cm2` in any session, `node cm2d.js state` (or
 `curl http://desktop:7777/state`), `node cm2d.js demo` walks six fake sessions
