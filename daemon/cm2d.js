@@ -378,6 +378,12 @@ async function run(dir) {
   let lastKeymap = null;             // the pad's keymap as last read or written; /config shows it, and the GUI's writes are validated against it
   const keymapSummary = (km) => { const l = km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]; return l ? { rows: l.layout.keymap, encoders: l.layout.encoders, joystick: l.layout.joystick, lights: l.lights, macros: km.macros || [] } : null; };
   const computeKeysZone = (km) => zone(cfg.keys === "keymap" ? km?.profiles?.[km.activeProfileId ?? 0]?.layers?.[0]?.lights?.backlight : cfg.keys === "off" ? null : cfg.keys, 0xffffff, cfg.brightness);
+  /** Does the pad differ from what the config says layer 1 should be? (config is the source of truth; null cells and null
+   *  encoders/joystick/lights mean "whatever the pad has", so they never count as a difference) */
+  const needsReprogram = (km) => {
+    try { const want = agentKeymap(JSON.parse(JSON.stringify(km)), cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }); return JSON.stringify(keymapSummary(want)) !== JSON.stringify(keymapSummary(km)); }
+    catch (e) { log("config does not fit this pad:", e.message); return false; }
+  };
   /** Reprogram layer 1 from the config over the daemon's own connection (no pause needed: one writer). */
   async function applyLayout() {
     if (!pad) throw new Error("pad not connected");
@@ -548,6 +554,8 @@ async function run(dir) {
       const agentKeys = await checkAgentKeys(km, st);
       lastKeymap = km; keysZone = computeKeysZone(km);
       device = { connected: true, path: info.path, usb: (info.release & 3) === 0, agentKeys, ...st };
+      // a config saved while the pad was away (or changed by Input) lands here: reconcile once per connect
+      if (km && needsReprogram(km)) { if (inputAppRunning()) log("pad differs from config but the Input app is running; not reprogramming"); else { log("pad differs from config; reprogramming"); await applyLayout(); } }
       log(`pad connected: fw ${st.version} battery ${st.battery}%${st.is_charging ? " charging" : ""} ${device.usb ? "USB" : "BLE"}`);
       pad.on("key", onKey);
       lastSent = ""; pushFails = 0; await push(true);
