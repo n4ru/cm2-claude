@@ -131,13 +131,19 @@ simplest when the pad always lives on one machine; relay adds auto-discovery for
 a pad that moves. The pad machine itself always runs the daemon (it is the host).
 
 **Configuring the plugin.** Claude Code plugins have no settings page, and this
-one has one optional setting: a daemon to talk to *directly*, skipping the local
-relay. The hook script uses `CM2_URL` from the environment if set, else the
-single line in `~/.config/cm2-claude/url` (for example
-`http://100.124.22.74:7777`), else `http://127.0.0.1:7777`, which is the local
-relay (or the host, on the pad's machine). Set it where running a relay is not
-wanted, or where Node is missing (Termux); `/cm2` prints which address it is
-using. From WSL use the desktop's Tailscale address, not the WSL gateway.
+one has one optional setting: which daemon this machine's hooks talk to. Set it
+with a command rather than by hand:
+
+```bash
+node daemon/cm2d.js direct http://100.124.22.74:7777   # direct: post to that daemon, run none locally
+node daemon/cm2d.js relay                              # relay: run a local daemon that finds the host
+node daemon/cm2d.js mode                               # print the current mode
+```
+
+Under the hood that is the single line in `~/.config/cm2-claude/url` (a remote
+address = direct, unset or localhost = relay), which the hook script also reads
+from `CM2_URL` if set. `/cm2` prints which address it is using. From WSL use the
+desktop's Tailscale address, not the WSL gateway.
 Everything else (keys, colours, hold time, talk key) is configured in the
 host's own page, not in the plugin. `hooks/install-hooks.sh` is the no-plugin
 fallback (writes the hooks into `~/.claude/settings.json`; `--remove` takes

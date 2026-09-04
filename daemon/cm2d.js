@@ -947,6 +947,23 @@ async function main(argv) {
     case "press": return post("/key", { key: argv[1], act: argv[2] === undefined ? 1 : +argv[2] });
     case "stick": return post("/key", { joystick: { a: +argv[1], d: argv[2] === undefined ? 1 : +argv[2] } });
     case "install": case "uninstall": return taskCmd(dir, cmd);
+    case "direct": {                                              // this machine's hooks post straight to a remote daemon; run none locally
+      const u = (argv[1] || "").replace(/\/+$/, "");
+      if (!/^https?:\/\//.test(u)) { console.error("usage: cm2d direct <daemon url>   e.g. cm2d direct http://100.124.22.74:7777"); process.exitCode = 2; return; }
+      fs.writeFileSync(path.join(dir, "url"), u + "\n");
+      await stopDaemon(dir, cfg.port);                            // drop any local relay
+      return console.log(`direct mode: hooks post to ${u}; no local daemon (a new session's SessionStart will not start one)`);
+    }
+    case "relay": {                                               // this machine runs a local daemon that forwards hooks to whichever machine has the pad
+      try { fs.unlinkSync(path.join(dir, "url")); } catch { /* none */ }
+      startDetached(dir, cfg);
+      return console.log("relay mode: started a local daemon that finds the pad's host and forwards hooks");
+    }
+    case "mode": {
+      const uf = path.join(dir, "url"), u = fs.existsSync(uf) ? fs.readFileSync(uf, "utf8").trim() : "";
+      const local = !u || /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(u);
+      return console.log(local ? `relay mode (runs a local daemon; url=${u || "unset"})` : `direct mode (hooks post to ${u}; no local daemon)`);
+    }
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
     case "onboard": return post("/onboard", {});
     case "demo": {
@@ -975,7 +992,7 @@ async function main(argv) {
         await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, padExtras(cfg)));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
-      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|start|stop|restart|press KEY|state|demo"); process.exitCode = 2;
+      default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|start|stop|restart|direct URL|relay|mode|onboard|press KEY|state|demo"); process.exitCode = 2;
     }
   } finally {
     await pad.close();
