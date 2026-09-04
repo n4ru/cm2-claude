@@ -750,7 +750,7 @@ async function run(dir) {
         return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
-      if (req.method === "POST" && req.url === "/onboard") { if (!loopback(req)) { res.writeHead(403); return res.end(); } onboard(); return respond(res); }
+      if (req.method === "POST" && req.url === "/onboard") { onboard(); return respond(res); } // benign: plays the welcome animation
       if (req.method === "GET" && req.url.startsWith("/uia")) {   // diagnostic/feature: read or click the app's accessibility tree
         if (!loopback(req)) { res.writeHead(403); return res.end(); }
         const q = new URL(req.url, "http://x").searchParams, ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), q.get("mode") || "dump", q.get("target") || ""], { windowsHide: true });

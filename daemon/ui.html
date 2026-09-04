@@ -204,7 +204,7 @@
     <div class="row">
       <label class="f"><span>talkMode</span><select id="talkMode"><option value="toggle">toggle</option><option value="hold">hold</option></select></label>
       <label class="f"><span>talkKeys</span><input id="talkKeys" class="mid mono" spellcheck="false" placeholder="91, 72"></label>
-      <label class="chk"><input type="checkbox" id="focusOnPress"> focus session on key press</label>
+      <label class="chk"><input type="checkbox" id="focusOnPress"> key press switches the desktop app to that session (background; double-tap also raises the window)</label>
     </div>
     <div class="row">
       <label class="f"><span style="min-width:104px">Agent keys show</span>
@@ -220,6 +220,8 @@
     </div>
     <div class="row">
       <label class="chk"><input type="checkbox" id="focusDowngrade"> green turns white for the selected session while the Claude window is focused (Codex)</label>
+      <label class="chk"><input type="checkbox" id="followDesktop"> the breathing key follows whichever session the desktop app is showing (reads it over accessibility every ~2 s, so it tracks clicks and Ctrl+Tab too)</label>
+      <div class="row" style="align-items:center"><span class="hint" style="margin-top:0;flex:1">A one-time welcome animation plays on first connect.</span><button id="onboardBtn" class="ghost">Play welcome</button></div>
     </div>
     <div class="row">
       <label class="f"><span>approve</span><select id="actApprove"></select></label>
@@ -261,7 +263,7 @@ const DEFC = { idle: 0xffffff, working: 0x304ffe, awaiting: 0xff6d00, unread: 0x
 const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode",
                   "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights",
                   "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs",
-                  "focusDowngrade", "ambientMode"];
+                  "focusDowngrade", "ambientMode", "followDesktop"];
 const DIRS = ["up", "down", "left", "right"];
 const DIMS = [[0, "Off"], [30000, "30 seconds"], [60000, "1 minute"], [180000, "3 minutes"],
               [600000, "10 minutes"], [1800000, "30 minutes"], [3600000, "1 hour"]];
@@ -272,7 +274,7 @@ const DIAL_HINT = {
 };
 const STICK_HINT = {
   vendor: "The daemon reads the stick and sends a shortcut once per push (deadzone at half deflection, re-arms when released). " +
-          "Windows virtual-key codes, comma separated — e.g. 16, 9 for Shift+Tab. The joystick type / sectors below are ignored.",
+          "Windows virtual-key codes, comma separated — e.g. 17, 9 = Ctrl+Tab (next session), 17, 16, 9 = Ctrl+Shift+Tab (previous). The joystick type / sectors below are ignored.",
   keymap: "The pad sends its own joystick keycodes; the type / sectors below apply.",
 };
 const DEF_ZONE = { effect: "solid", brightness: 1, speed: 0.5, magic: 1, color: 0xffffff };
@@ -478,6 +480,7 @@ function renderForms() {
   $("doubleTapMs").value = cfg.doubleTapMs == null ? 350 : cfg.doubleTapMs;
   $("focusDowngrade").checked = !!cfg.focusDowngrade;
   $("ambientMode").value = cfg.ambientMode === "codex" ? "codex" : "urgent";
+  $("followDesktop").checked = cfg.followDesktop !== false;
   syncGating();
   renderEdAct();
   $("roHint").textContent = "read-only: port " + cfg.port + " · bind " + cfg.bind + " · resyncMs " + cfg.resyncMs + " · ttlMs " + cfg.ttlMs;
@@ -667,6 +670,8 @@ function wire() {
   on("doubleTapMs", "input", () => { if (cfg) { cfg.doubleTapMs = Number($("doubleTapMs").value) || 0; touched(); } });
   on("focusDowngrade", "change", () => { if (cfg) { cfg.focusDowngrade = $("focusDowngrade").checked; touched(); } });
   on("ambientMode", "change", () => { if (cfg) { cfg.ambientMode = $("ambientMode").value; touched(); } });
+  on("followDesktop", "change", () => { if (cfg) { cfg.followDesktop = $("followDesktop").checked; touched(); } });
+  on("onboardBtn", "click", async () => { try { await fetch("/onboard", { method: "POST" }); setStatus("welcome animation played", "ok"); } catch (e) { setStatus("onboard: " + (e && e.message ? e.message : e), "err"); } });
   on("focusOnPress", "change", () => { if (cfg) { cfg.focusOnPress = $("focusOnPress").checked; touched(); } });
   for (const [id, key] of [["actApprove", "approve"], ["actReject", "reject"], ["actTalk", "talk"]])
     on(id, "change", () => { if (!cfg) return; cfg.actions = Object.assign({}, cfg.actions); cfg.actions[key] = $(id).value; renderEdAct(); touched(); });
