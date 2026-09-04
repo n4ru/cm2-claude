@@ -81,8 +81,8 @@ const DEFAULTS = {
   joystick: null,   // used when stick.mode = "keymap": {"type": "JOYSTICK", "sectors": []} or {"type": "RADIAL", "sectors": [{"k": "KC_UP", "a1": 0.625, "a2": 0.875}, ...]}
   lights: null,     // the pad's own stored lighting when nothing drives it, e.g. {"backlight": {"effect": "solid", "brightness": 1, "speed": 0.5, "magic": 1, "color": 16777215}, "underglow": {...}}
   // ---- the Codex Micro behaviours (from the ChatGPT app's own layout), all on by default
-  dial: "navigate",     // "navigate": turn = previous / next option (Arrow Up / Down), click = Enter, hold 500 ms = open the configurator;
-                        // using the dial puts the pad in "navigating" for 2 s: blue snake ring, AG00 red and acting as Escape. "keymap" = `encoders`
+  dial: "navigate",     // daemon-driven dial modes: "navigate" (Arrow Up/Down/Enter; puts the pad in "navigating" for 2 s: blue snake, AG00=Esc),
+                        // "scroll" (Page Up/Down/Enter), "volume" (Vol Up/Down/Mute). "keymap" = the pad sends `encoders` itself. Click always = the mode's press; hold 500 ms opens the configurator.
   // vendor = the daemon reads the stick, fires one shortcut per push past half deflection, re-arms at rest. "keymap" = `joystick`.
   // Defaults are the Claude desktop app's documented Code-tab shortcuts: left/right cycle sessions in the sidebar
   // (Ctrl+Shift+Tab / Ctrl+Tab — this is how you jump between sessions from the pad today), up cycles the transcript
@@ -90,7 +90,8 @@ const DEFAULTS = {
   stick: { mode: "vendor", up: [0x11, 0x4f], down: [0x11, 0xc0], left: [0x11, 0x10, 0x09], right: [0x11, 0x09] },
   actionKeys: {},       // more vendor keys handled here, e.g. {"ACT09": {"chord": [17, 78]}, "ACT12": {"text": "Not sure, use your judgment", "enter": true}, "ACT11": {"raise": true}, "ACT06": {"open": "config"}}
   autoDimMs: 180000,    // Codex: lights off after 3 min without a key, stick or status change; anything wakes them. 0 = never
-  agentSource: "recent",// Codex: the six most recently active sessions, most recent on AG00. "sticky": a session keeps its key until it ends
+  agentSource: "recent",// which sessions hold the six keys: "recent" (most recently active first), "priority" (awaiting/unread first), "sticky" (a session keeps its key until it ends), "pinned" (cfg.pins)
+  pins: {},             // agentSource "pinned": { "<slot 0-5>": "<session id>" } — that key always follows that session, its slot reserved even while the session is away
   doubleTapMs: 350,     // second tap on the same agent key within this raises the Claude window; also the mic latch window
   focusDowngrade: true, // Codex: the selected session's green (done, unread) turns white while the Claude window is focused
   ambientMode: "urgent",// ring = most urgent state of any session. "codex": only the selected session working (blue snake), else off
@@ -100,7 +101,7 @@ const DEFAULTS = {
 /** Which encoders / joystick / lights setup-keys writes, honouring the dial and stick modes. The encoder order is the
  *  one the Input app's ChatGPT preset uses (CC, CW, click), so the daemon's mapping matches the Codex feel. */
 const padExtras = (cfg) => ({
-  encoders: cfg.dial === "navigate" ? [["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]] : cfg.encoders,
+  encoders: cfg.dial !== "keymap" ? [["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]] : cfg.encoders,
   joystick: cfg.stick && cfg.stick.mode === "vendor" ? { type: "VENDOR", sectors: [] } : cfg.joystick,
   lights: cfg.lights,
 });
@@ -112,7 +113,7 @@ function loadConfig(dir) {
 }
 const mergeConfig = (user) => ({ ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions }, stick: { ...DEFAULTS.stick, ...user.stick } });
 
-const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode", "followDesktop"];
+const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "pins", "doubleTapMs", "focusDowngrade", "ambientMode", "followDesktop"];
 const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions", "dial", "stick"];
 /** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
  *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
@@ -202,6 +203,8 @@ const raiseClaude = () => inject("raise");
 const openUrl = (u) => inject("open " + u);
 const foreground = (cb) => { if (process.platform !== "win32") return cb(""); fgWaiters.push(cb); inject("fg"); };
 const VK = { up: 0x26, down: 0x28, enter: 0x0d, esc: 0x1b };
+// daemon-driven dial modes: what a clockwise / counter-clockwise / click sends. "keymap" is absent (the pad sends its own encoder keycodes).
+const DIAL_KEYS = { navigate: { cw: [0x26], cc: [0x28], clk: [0x0d] }, scroll: { cw: [0x21], cc: [0x22], clk: [0x0d] }, volume: { cw: [0xaf], cc: [0xae], clk: [0xad] } };
 // A second long-lived PowerShell that reports which session the desktop app is showing, so the pad can breathe that
 // key even when the user switches by clicking or Ctrl+Tab. It reads the toolbar's "<title>, rename session" button
 // (caching it; re-finding when it goes stale). Reads only, never acts, so it can never disturb anything.
@@ -419,8 +422,18 @@ class Engine {
   }
   /** Codex's "recent" agent source: the six most recently active sessions, most recent on AG00; the rest have no key. */
   reslot() {
-    if (this.cfg.agentSource !== "recent") return;
-    [...this.sessions.values()].sort((a, b) => b.seen - a.seen).forEach((s, i) => { s.slot = i < SLOTS ? i : null; });
+    const src = this.cfg.agentSource;
+    if (src === "sticky") return;                                            // a session keeps its slot until it ends
+    const list = [...this.sessions.values()];
+    if (src === "pinned") {
+      const pins = this.cfg.pins || {}, pinnedSlots = new Set(Object.keys(pins).map(Number)), pinnedIds = new Set(Object.values(pins));
+      for (const [slot, id] of Object.entries(pins)) { const s = this.sessions.get(id); if (s) s.slot = +slot; }  // pinned session takes its key
+      const free = []; for (let i = 0; i < SLOTS; i++) if (!pinnedSlots.has(i)) free.push(i);                      // pinned slots stay reserved when away
+      list.filter((s) => !pinnedIds.has(s.id)).sort((a, b) => b.seen - a.seen).forEach((s, i) => { s.slot = i < free.length ? free[i] : null; });
+      return;
+    }
+    const cmp = src === "priority" ? (a, b) => (PRIO[b.state] - PRIO[a.state]) || (b.seen - a.seen) : (a, b) => b.seen - a.seen;
+    list.sort(cmp).forEach((s, i) => { s.slot = i < SLOTS ? i : null; });     // recent (default) or priority
   }
   slots() { return [...this.sessions.values()].map((s) => s.id + ":" + s.slot).sort().join(","); }
   /** Codex: while the window is focused, the selected session's "done, unread" green is already seen. */
@@ -468,7 +481,7 @@ class Engine {
     if (!s) { this.selected = null; return true; }
     this.selected = this.selected === s.id ? null : s.id;
     if (s.state === "unread" || s.state === "error") s.state = "idle";
-    if (this.cfg.agentSource !== "recent") s.seen = this.now();   // in "recent" mode a press must not shuffle the keys
+    if (!["recent", "priority"].includes(this.cfg.agentSource)) s.seen = this.now();   // a press must not reshuffle the sorted views (recent/priority)
     return true;
   }
   sweep() {
@@ -537,9 +550,15 @@ async function run(dir) {
     lastKeymap = km; keysZone = computeKeysZone(km); lastSent = "";
     log("keymap reprogrammed from config"); await push(true);
   }
-  let talkHeld = false;              // while recording the non-agent keys glow red and the ring runs Codex's green "recording" snake
+  // Codex's mic lighting: a sea-green light moves around the ring while recording, a white light moves while the
+  // speech is processed, then the ring goes solid white when the prompt is ready. Win+H types live so there is no real
+  // processing/ready signal; the last two phases are a short timed sequence after you release.
+  let talkPhase = "off", talkTimer = null;   // "off" | "recording" | "processing" | "ready"
   let flash = null;                  // {until, color}: the other keys show the newly selected session's colour for flashMs
-  const VOICE_AMBIENT = { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: 0x2e8b57 };
+  const VOICE_GREEN = 0x2e8b57;
+  const talkZone = () => talkPhase === "recording" ? { e: EFFECT.snake, b: cfg.brightness, s: 0.4, m: 0, c: VOICE_GREEN }
+    : talkPhase === "processing" ? { e: EFFECT.snake, b: cfg.brightness, s: 0.75, m: 0, c: cfg.colors.idle }
+    : talkPhase === "ready" ? { e: EFFECT.solid, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.idle } : null;
   let dialUntil = 0, dialTimer = null, encHold = null, encConsumed = false;   // "navigating": 2 s after the last dial event
   let lastTap = null;                // {slot, at} for the agent-key double tap
   let dimmed = false, lastActivity = Date.now();                              // auto-dim
@@ -613,12 +632,13 @@ async function run(dir) {
     const { threads, top } = engine.render();
     if (flash && flash.until <= Date.now()) flash = null;
     const sel = engine.selected && engine.sessions.get(engine.selected);
-    let ambient = talkHeld ? VOICE_AMBIENT
+    const tz = talkZone();
+    let ambient = tz ? tz
       : dialActive() ? { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: cfg.colors.working }
       : cfg.ambientMode === "codex" ? (sel && sel.state === "working" ? { e: 2, b: cfg.brightness, s: 0.4, m: 0, c: cfg.colors.working } : flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : OFF)
       : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
     if (dialActive()) threads[0] = { id: 0, c: cfg.colors.error, b: cfg.brightness, e: 1, s: 0, sk: 0, sa: 0 };   // AG00 is Escape while navigating
-    const keys = talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : keysZone;
+    const keys = flash ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: flash.color } : keysZone;   // the ring shows the mic state; the keys stay normal
     const payload = JSON.stringify([threads, ambient, keys]);
     if (!force && payload === lastSent) return;
     try {
@@ -661,27 +681,28 @@ async function run(dir) {
     schedule();
   }
   /** Recording on/off: the shortcut first (the mic matters more than the light), then one RPC for the light. */
+  const setPhase = (ph) => { talkPhase = ph; lastSent = ""; if (pad && !dimmed) push(true); };
   function setTalk(on) {
-    if (on === talkHeld) return;
-    talkHeld = on;
+    const recording = talkPhase === "recording";
+    if (on === recording) return;
+    clearTimeout(talkTimer);
     sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (on ? "d" : "u") : "t");
-    log(`talk: ${on ? "listening" : "stop"}`);
-    if (pad && !dimmed) {
-      const { top } = engine.render();
-      pad.setZones(on ? VOICE_AMBIENT : zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), on ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
-      lastSent = "";
-    }
+    if (on) { log("talk: listening"); setPhase("recording"); }                    // sea-green moving
+    else { log("talk: stop"); setPhase("processing");                             // white moving...
+      talkTimer = setTimeout(() => { setPhase("ready");                           // ...then solid white (prompt ready to send)
+        talkTimer = setTimeout(() => setPhase("off"), 2200); }, 700); }
   }
   const ptt = new Ptt(cfg.doubleTapMs, () => setTalk(true), () => setTalk(false));
   /** Dial as a cursor (Codex "composer-navigation"): clockwise = previous option, counter-clockwise = next, click = Enter,
    *  hold 500 ms = open the configurator. Any use makes the pad "navigating" for 2 s (blue snake, AG00 red = Escape). */
   function dial(key, act) {
-    dialUntil = Date.now() + 2000; clearTimeout(dialTimer); dialTimer = setTimeout(() => schedule(), 2050);
-    if (key === "ENC_CW") { sendKeys([VK.up]); log("dial: previous (Up)"); }
-    else if (key === "ENC_CC") { sendKeys([VK.down]); log("dial: next (Down)"); }
+    const m = DIAL_KEYS[cfg.dial]; if (!m) return;                           // "keymap": the pad sends its own encoder keycodes
+    if (cfg.dial === "navigate") { dialUntil = Date.now() + 2000; clearTimeout(dialTimer); dialTimer = setTimeout(() => schedule(), 2050); }  // the "navigating" window (AG00=Esc) is composer-nav only
+    if (key === "ENC_CW") { sendKeys(m.cw); log(`dial ${cfg.dial}: CW`); }
+    else if (key === "ENC_CC") { sendKeys(m.cc); log(`dial ${cfg.dial}: CC`); }
     else if (key === "ENC_CLK") {
       if (act === 1) { encConsumed = false; clearTimeout(encHold); encHold = setTimeout(() => { encConsumed = true; openUrl(url()); log("dial held: configurator"); }, 500); }
-      else if (act === 0) { clearTimeout(encHold); if (!encConsumed) sendKeys([VK.enter]); }
+      else if (act === 0) { clearTimeout(encHold); if (!encConsumed) sendKeys(m.clk); }
     }
     schedule();
   }
@@ -920,7 +941,9 @@ function startDetached(dir, cfg) {
 }
 function taskCmd(dir, action) {
   if (action === "install") {
-    const tr = `"${process.execPath}" "${__filename}" run`;   // the task runs node directly; the daemon writes its own log (no .vbs)
+    // launch node through a hidden PowerShell so the task shows no console window (node run by the task directly shows one).
+    // node runs as PowerShell's child in its hidden console; the daemon writes its own log, so no shell redirection is needed.
+    const tr = `powershell -NoProfile -WindowStyle Hidden -Command "& '${process.execPath}' '${__filename}' run"`;
     execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", tr], { stdio: "inherit" });
     execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
   } else {

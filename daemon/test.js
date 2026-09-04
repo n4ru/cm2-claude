@@ -74,6 +74,31 @@ const STICKY = { ...DEFAULTS, agentSource: "sticky" };
   void before;
 }
 
+// "priority" agent source: awaiting/unread sort to the top keys, presses don't reshuffle
+{
+  let t = 0; const e = new Engine({ ...DEFAULTS, agentSource: "priority" }, () => t);
+  const ev = (id, name, extra) => e.handle({ session_id: id, hook_event_name: name, ...extra });
+  for (const id of ["a", "b", "c"]) { t++; ev(id, "SessionStart"); }          // all idle
+  t++; ev("b", "Stop");                                                        // b -> unread
+  t++; ev("c", "PermissionRequest");                                           // c -> awaiting (highest)
+  assert.equal(e.sessions.get("c").slot, 0, "awaiting on AG00");
+  assert.equal(e.sessions.get("b").slot, 1, "unread next");
+  assert.equal(e.sessions.get("a").slot, 2, "idle last");
+  e.press(0); assert.equal(e.selected, "c"); assert.equal(e.sessions.get("c").slot, 0); // press selects, order unchanged
+}
+
+// "pinned" agent source: a session is fixed to its key; its slot stays reserved when it is away; others fill the rest
+{
+  let t = 0; const e = new Engine({ ...DEFAULTS, agentSource: "pinned", pins: { "3": "b" } }, () => t);
+  const ev = (id, name) => e.handle({ session_id: id, hook_event_name: name });
+  for (const id of ["a", "b", "c"]) { t++; ev(id, "SessionStart"); }
+  assert.equal(e.sessions.get("b").slot, 3, "b pinned to key 3");
+  assert.deepEqual([e.sessions.get("a").slot, e.sessions.get("c").slot].sort(), [0, 1], "others fill non-pinned slots by recency");
+  assert.equal(ev("b", "SessionEnd"), true); t++; ev("d", "SessionStart");
+  assert.notEqual(e.sessions.get("d").slot, 3, "key 3 stays reserved for the pin even while b is gone");
+}
+
+
 // stick sectors: Codex's table, angle in turns with 0 = right
 assert.deepEqual([0, 0.2, 0.5, 0.75, 0.9, 0.12, 0.13].map(sectorOf), ["right", "down", "left", "up", "right", "right", "down"]);
 

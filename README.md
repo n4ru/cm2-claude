@@ -282,8 +282,11 @@ a keyboard shortcut on the desktop at each edge (`talkKeys`, virtual-key codes,
 default Win+H, and `talkMode`). `"toggle"` taps the chord on press and again on
 release, which opens Windows voice typing while held and closes it after: the
 dictated text lands in whatever has focus, so with the Claude window focused it
-goes into the open session's prompt. While held, the non-agent keys glow red and
-the ring runs Codex's green "recording" snake. `"hold"` keeps the chord pressed
+goes into the open session's prompt. The ring mirrors Codex's mic lighting: a
+sea-green light moves around it while you record, a white light moves while the
+speech is processed, then it goes solid white when the prompt is ready to send.
+(Windows voice typing types live, so the processing and ready phases are a short
+timed sequence after you release, not a real transcription signal.) `"hold"` keeps the chord pressed
 for the duration, for a push-to-talk hotkey. The Windows Claude app exposes no
 dictation hotkey in its config (its Caps Lock "speak to Claude" feature appears
 to be the macOS quick-entry path); if a later build lists one under Keyboard

@@ -102,6 +102,7 @@
       <button id="edKeep" class="ghost">keep pad's value</button>
       <button id="edClose" class="ghost">close</button>
     </div>
+    <div class="row"><label class="f"><span>preset</span><select id="edPreset"></select></label></div>
     <div class="row" id="edActRow" hidden>
       <label class="f"><span>daemon action</span>
         <select id="edAct">
@@ -129,7 +130,9 @@
       <div class="row">
         <label class="f"><span>Dial</span>
           <select id="dialMode">
-            <option value="navigate">navigate — daemon drives it</option>
+            <option value="navigate">navigate — Arrow Up / Down / Enter (Codex composer nav)</option>
+            <option value="scroll">scroll — Page Up / Down</option>
+            <option value="volume">volume — Volume Up / Down / Mute</option>
             <option value="keymap">keymap — the pad sends keycodes</option>
           </select>
         </label>
@@ -209,10 +212,22 @@
     <div class="row">
       <label class="f"><span style="min-width:104px">Agent keys show</span>
         <select id="agentSource">
-          <option value="recent">the six most recently active sessions, most recent on AG00 (Codex default)</option>
+          <option value="recent">most recently active first, on AG00 (Codex default)</option>
+          <option value="priority">needs-you first — awaiting / unread on the top keys</option>
           <option value="sticky">a session keeps its key until it ends</option>
+          <option value="pinned">pinned — assign a session to each key (below)</option>
         </select>
       </label>
+    </div>
+    <div id="pinsBlock" hidden><span class="hint" style="margin-top:0">Pin a session to each key; its slot stays reserved while it is away.</span>
+      <div class="grid2">
+        <label class="f"><span style="min-width:42px">AG00</span><select id="pin_0"></select></label>
+        <label class="f"><span style="min-width:42px">AG01</span><select id="pin_1"></select></label>
+        <label class="f"><span style="min-width:42px">AG02</span><select id="pin_2"></select></label>
+        <label class="f"><span style="min-width:42px">AG03</span><select id="pin_3"></select></label>
+        <label class="f"><span style="min-width:42px">AG04</span><select id="pin_4"></select></label>
+        <label class="f"><span style="min-width:42px">AG05</span><select id="pin_5"></select></label>
+      </div>
     </div>
     <div class="row">
       <label class="f"><span style="min-width:150px">double-tap window (ms)</span><input type="number" id="doubleTapMs" class="num" min="0" step="50"></label>
@@ -263,15 +278,18 @@ const DEFC = { idle: 0xffffff, working: 0x304ffe, awaiting: 0xff6d00, unread: 0x
 const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode",
                   "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights",
                   "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs",
-                  "focusDowngrade", "ambientMode", "followDesktop"];
+                  "focusDowngrade", "ambientMode", "followDesktop", "pins"];
 const DIRS = ["up", "down", "left", "right"];
 const DIMS = [[0, "Off"], [30000, "30 seconds"], [60000, "1 minute"], [180000, "3 minutes"],
               [600000, "10 minutes"], [1800000, "30 minutes"], [3600000, "1 hour"]];
 const DIAL_HINT = {
-  navigate: "Codex style: turn = previous / next option (Arrow Up / Down), click = Enter, hold 500 ms = open this configurator. " +
-            "The pad reports the dial to the daemon, so the keycodes below are ignored.",
+  navigate: "Codex composer nav: turn = Arrow Up / Down, click = Enter, hold 500 ms = open this configurator. Using it makes the pad 'navigating' for 2 s (blue ring, AG00 = Esc). The daemon injects; the keycodes below are ignored.",
+  scroll: "Turn = Page Up / Down, click = Enter, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
+  volume: "Turn = Volume Up / Down, click = Mute, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
   keymap: "The pad sends these keycodes itself.",
 };
+// common Claude desktop Code-tab shortcuts, as pad chords (the key types the shortcut when the app is focused)
+const NAMED = [["New session", "KC_LCTL+KC_N"], ["Close session", "KC_LCTL+KC_W"], ["Next session", "KC_LCTL+KC_TAB"], ["Previous session", "KC_LCTL+KC_LSFT+KC_TAB"], ["Toggle diff pane", "KC_LCTL+KC_LSFT+KC_D"], ["Toggle browser pane", "KC_LCTL+KC_LSFT+KC_B"], ["Toggle terminal", "KC_LCTL+KC_GRV"], ["Close focused pane", "KC_LCTL+KC_BSLS"], ["Side chat", "KC_LCTL+KC_SCLN"], ["Cycle view modes", "KC_LCTL+KC_O"], ["Permission-mode menu", "KC_LCTL+KC_LSFT+KC_M"], ["Model menu", "KC_LCTL+KC_LSFT+KC_I"], ["Effort menu", "KC_LCTL+KC_LSFT+KC_E"], ["Stop (Esc)", "KC_ESC"]];
 const STICK_HINT = {
   vendor: "The daemon reads the stick and sends a shortcut once per push (deadzone at half deflection, re-arms when released). " +
           "Windows virtual-key codes, comma separated — e.g. 17, 9 = Ctrl+Tab (next session), 17, 16, 9 = Ctrl+Shift+Tab (previous). The joystick type / sectors below are ignored.",
@@ -404,12 +422,25 @@ function renderSessions() {
     "<td>" + esc(s.title || "") + "</td><td>" + esc(s.cwd || "") + "</td>" +
     "<td>" + (pending.has(s.id) ? '<span class="warn">held</span>' : "") + "</td>" +
     '<td class="mono" style="color:var(--dim)">' + esc(String(s.id).slice(0, 8)) + "</td></tr>").join("");
+  renderPins();
 }
 
 function opts(list, sel) { return list.map((v) => '<option value="' + esc(v) + '"' + (v === sel ? " selected" : "") + ">" + esc(v) + "</option>").join(""); }
+function renderPins() {
+  if (!cfg || $("agentSource").value !== "pinned") return;
+  const sessions = (st && st.sessions) || [], pins = cfg.pins || {};
+  for (let i = 0; i < 6; i++) {
+    const sel = $("pin_" + i); if (!sel) continue;
+    const cur = pins[i] || "";
+    let html = '<option value="">— none —</option>' + sessions.map((x) => '<option value="' + esc(x.id) + '"' + (x.id === cur ? " selected" : "") + ">" + esc(x.title || String(x.id).slice(0, 8)) + "</option>").join("");
+    if (cur && !sessions.some((x) => x.id === cur)) html += '<option value="' + esc(cur) + '" selected>' + esc(String(cur).slice(0, 8)) + " (away)</option>";
+    sel.innerHTML = html;
+  }
+}
 
 function buildStatics() {
   $("kcs").innerHTML = KEYCODES.map((k) => '<option value="' + k + '">').join("");
+  $("edPreset").innerHTML = '<option value="">— common Claude actions (fills a chord) —</option>' + NAMED.map((n) => '<option value="' + esc(n[1]) + '">' + esc(n[0]) + '</option>').join("");
   $("keysZone").innerHTML = opts(["off", "keymap"]);
   const acts = ["ACT06", "ACT07", "ACT08", "ACT09", "ACT10", "ACT11", "ACT12"];
   for (const id of ["actApprove", "actReject", "actTalk"]) $(id).innerHTML = opts(acts);
@@ -469,14 +500,15 @@ function renderForms() {
     $("lz_" + z + "_speed").value = v.speed == null ? 0.5 : v.speed;
     for (const f of ["effect", "color", "brightness", "speed"]) $("lz_" + z + "_" + f).disabled = !lights;
   }
-  $("dialMode").value = cfg.dial === "navigate" ? "navigate" : "keymap";
+  $("dialMode").value = ["navigate", "scroll", "volume", "keymap"].includes(cfg.dial) ? cfg.dial : "navigate";
   const stick = cfg.stick || {};
   $("stickMode").value = stick.mode === "vendor" ? "vendor" : "keymap";
   for (const d of DIRS) $("stk_" + d).value = Array.isArray(stick[d]) ? stick[d].join(", ") : "";
   const dim = String(cfg.autoDimMs == null ? 0 : cfg.autoDimMs);
   if (!Array.prototype.some.call($("autoDimMs").options, (o) => o.value === dim)) $("autoDimMs").add(new Option(dim + " ms", dim));
   $("autoDimMs").value = dim;
-  $("agentSource").value = cfg.agentSource === "sticky" ? "sticky" : "recent";
+  $("agentSource").value = ["recent", "priority", "sticky", "pinned"].includes(cfg.agentSource) ? cfg.agentSource : "recent";
+  renderPins();
   $("doubleTapMs").value = cfg.doubleTapMs == null ? 350 : cfg.doubleTapMs;
   $("focusDowngrade").checked = !!cfg.focusDowngrade;
   $("ambientMode").value = cfg.ambientMode === "codex" ? "codex" : "urgent";
@@ -488,11 +520,12 @@ function renderForms() {
 
 // greys out the fields the current dial / stick mode makes irrelevant
 function syncGating() {
-  const navi = $("dialMode").value === "navigate";
-  $("dialHint").textContent = DIAL_HINT[navi ? "navigate" : "keymap"];
-  $("dialKeymap").classList.toggle("off", navi);
-  $("encKeep").disabled = navi;
-  for (const id of ["encCw", "encCcw", "encPress"]) $(id).disabled = navi || $("encKeep").checked;
+  const dm = $("dialMode").value, driven = dm !== "keymap";
+  $("dialHint").textContent = DIAL_HINT[dm] || DIAL_HINT.navigate;
+  $("dialKeymap").classList.toggle("off", driven);
+  $("encKeep").disabled = driven;
+  for (const id of ["encCw", "encCcw", "encPress"]) $(id).disabled = driven || $("encKeep").checked;
+  $("pinsBlock").hidden = $("agentSource").value !== "pinned";
   const vend = $("stickMode").value === "vendor";
   $("stickHint").textContent = STICK_HINT[vend ? "vendor" : "keymap"];
   $("stickVendor").hidden = !vend;
@@ -666,7 +699,13 @@ function wire() {
     setStatus(""); cfg.talkKeys = nums; touched();
   });
   on("autoDimMs", "change", () => { if (cfg) { cfg.autoDimMs = Number($("autoDimMs").value) || 0; touched(); } });
-  on("agentSource", "change", () => { if (cfg) { cfg.agentSource = $("agentSource").value; touched(); } });
+  on("agentSource", "change", () => { if (cfg) { cfg.agentSource = $("agentSource").value; syncGating(); renderPins(); touched(); } });
+  on("edPreset", "change", () => { const v = $("edPreset").value; if (!v) return; $("edChord").checked = v.indexOf("+") >= 0; $("edVal").value = v; $("edPreset").value = ""; commitEditor(); });
+  for (let i = 0; i < 6; i++) on("pin_" + i, "change", ((i) => () => {
+    if (!cfg) return; cfg.pins = Object.assign({}, cfg.pins); const v = $("pin_" + i).value;
+    for (const k of Object.keys(cfg.pins)) if (k === String(i) || cfg.pins[k] === v) delete cfg.pins[k];   // one session, one key
+    if (v) cfg.pins[i] = v; touched(); renderPins();
+  })(i));
   on("doubleTapMs", "input", () => { if (cfg) { cfg.doubleTapMs = Number($("doubleTapMs").value) || 0; touched(); } });
   on("focusDowngrade", "change", () => { if (cfg) { cfg.focusDowngrade = $("focusDowngrade").checked; touched(); } });
   on("ambientMode", "change", () => { if (cfg) { cfg.ambientMode = $("ambientMode").value; touched(); } });
