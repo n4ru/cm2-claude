@@ -22,7 +22,7 @@
  *   node cm2d.js install      autostart at logon (Windows scheduled task) + start now
  *   node cm2d.js uninstall
  *   node cm2d.js stop | restart   stop / relaunch the autostart daemon
- *   node cm2d.js press AG00   simulate a pad key (loopback only)
+ *   node cm2d.js press AG00 [act]   simulate a pad key press (act 1) or release (act 0); loopback only
  *   node cm2d.js state        what the running daemon thinks
  *   node cm2d.js demo         walk fake sessions through every colour
  */
@@ -30,7 +30,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { EventEmitter } = require("events");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 
 const VID = 0x303a, USAGE_PAGE = 0xff00, USAGE = 1;
 const REPORT_ID = 6, CH_DEBUG = 1, CH_RPC = 2, CHUNK = 61;
@@ -54,16 +54,20 @@ const DEFAULTS = {
     idle: { effect: "off" },
   },
   keys: "off",          // backlight of the non-agent keys. "off" = dark (what Codex does — the status keys pop); "keymap" = the pad's stored backlight; or {effect,color,brightness,speed}
-  actions: { approve: "ACT07", reject: "ACT08" }, // Codex Micro factory caps: ACT07 = APPR, ACT08 = REJ
+  actions: { approve: "ACT07", reject: "ACT08", talk: "ACT10" }, // Codex caps: ACT07 = APPR, ACT08 = REJ; ACT10 = hold-to-talk
+  // hold-to-talk: virtual-key codes sent on the Windows desktop while the talk key is held, and how.
+  // "toggle" taps the chord on press and again on release (Windows voice typing, Win+H: opens, then closes).
+  // "hold" presses the chord down on press and lifts it on release (a push-to-talk hotkey such as Claude's dictation shortcut).
+  talkKeys: [0x5b, 0x48], talkMode: "toggle",
   // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
   // a plain keycode types that key, an ARRAY is a chord written as an on-pad macro (modifiers held, last key
   // clicked: ["KC_LGUI","KC_H"] = Win+H), null keeps whatever is on the pad. Spares default to Esc (interrupt
-  // Claude), Win+H (Windows voice typing, the Codex mic key's job), and inert.
+  // Claude), the hold-to-talk action key (Windows voice typing while held: the Codex mic key's job), and inert.
   layout: [
     ["KV_OAI_AG00", "KV_OAI_AG01"],
     ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
     ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"],
-    [["KC_LGUI", "KC_H"], "KC_NONE", "KC_NONE"],
+    ["KV_OAI_ACT10", "KC_NONE", "KC_NONE"],
   ],
 };
 
@@ -108,6 +112,20 @@ function normalizeEvent(ev) {
   return ev;
 }
 const inputAppRunning = () => { try { return process.platform === "win32" && execFileSync("tasklist", ["/FI", "IMAGENAME eq input.exe", "/NH"], { encoding: "utf8" }).includes("input.exe"); } catch { return false; } };
+// Windows keystroke injection for hold-to-talk. One persistent PowerShell child (the Add-Type compile costs ~1 s,
+// so it is started with the daemon, not on the first press); each stdin line is a chord of virtual-key codes.
+const KEYS_PS = `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class K{[DllImport("user32.dll")]public static extern void keybd_event(byte vk,byte sc,uint fl,UIntPtr ex);}'
+while($l=[Console]::In.ReadLine()){$p=$l.Split(" ");$m=$p[0];$v=@($p[1..($p.Length-1)]|%{[byte]$_});if($m -ne "u"){foreach($k in $v){[K]::keybd_event($k,0,0,[UIntPtr]::Zero)}};if($m -ne "d"){[array]::Reverse($v);foreach($k in $v){[K]::keybd_event($k,0,2,[UIntPtr]::Zero)}}}`;
+let keysProc = null;
+/** edge: "t" tap (press then release), "d" press and keep down, "u" release. null just warms the injector up. */
+function sendKeys(vks, edge = "t") {
+  if (process.platform !== "win32") return vks && log("sendKeys (no-op off Windows):", edge, vks.join("+"));
+  if (!keysProc || keysProc.exitCode !== null) {
+    keysProc = spawn("powershell", ["-NoProfile", "-EncodedCommand", Buffer.from(KEYS_PS, "utf16le").toString("base64")], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+    keysProc.on("error", (e) => log("keys:", e.message));
+  }
+  if (vks) keysProc.stdin.write(`${edge} ${vks.join(" ")}\n`);
+}
 const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
 
 // ---------------------------------------------------------------- framing
@@ -305,6 +323,7 @@ async function run(dir) {
   const holds = new Map(); // session id -> respond(decision|null)
   let pad = null, keysZone = { e: 0, b: 0, s: 0, m: 0, c: 0 }, lastSent = "", device = { connected: false }, pushTimer = null;
   let dropPad = null, pushFails = 0; // a handle that stays "open" through BLE sleep answers nothing: after 3 failed pushes, reconnect
+  let talkHeld = false;              // while the talk key is down the non-agent keys glow red: "recording"
 
   const respond = (res, obj) => { res.writeHead(obj ? 200 : 204, { "Content-Type": "application/json" }); res.end(obj ? JSON.stringify(obj) : undefined); };
   const decision = (d) => (d ? { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: d, ...(d === "deny" ? { message: "Rejected on the Creator Micro" } : {}) } } : null);
@@ -313,11 +332,12 @@ async function run(dir) {
     if (!pad) return;
     const { threads, top } = engine.render();
     const ambient = zone(cfg.ambient[top], cfg.colors[top], cfg.brightness);
-    const payload = JSON.stringify([threads, ambient, keysZone]);
+    const keys = talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone;
+    const payload = JSON.stringify([threads, ambient, keys]);
     if (!force && payload === lastSent) return;
     try {
       await pad.setThreads(threads);
-      await pad.setZones(ambient, keysZone);
+      await pad.setZones(ambient, keys);
       lastSent = payload; pushFails = 0;
     } catch (e) {
       log("push failed:", e.message);
@@ -356,6 +376,12 @@ async function run(dir) {
   }
   function onKey({ key, act } = {}) {
     try {
+      if (key === cfg.actions.talk) {
+        if (act !== 1 && act !== 0) return;
+        talkHeld = act === 1;
+        sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (talkHeld ? "d" : "u") : "t");
+        log(`talk: ${talkHeld ? "listening" : "stop"}`); clearTimeout(pushTimer); return push();
+      }
       if (act !== 1) return;
       const m = /^AG0([0-5])$/.exec(key || "");
       if (m) { engine.press(+m[1]); log(`key ${key} -> select ${engine.selected ? engine.selected.slice(0, 8) : "none"}`); return schedule(); }
@@ -395,6 +421,7 @@ async function run(dir) {
   server.listen(cfg.port, cfg.bind, () => log(`listening on ${cfg.bind}:${cfg.port}`));
 
   let tick = 0;
+  if (cfg.actions.talk) sendKeys(null); // warm up the injector so the first hold-to-talk is instant
   setInterval(async () => {
     if (engine.sweep()) schedule();
     if (pad && ++tick % 4 === 0) { try { const st = await pad.status(); device.agentKeys = await checkAgentKeys(await pad.readKeymap(), st); Object.assign(device, st); } catch (e) { log("keymap check failed:", e.message); } }
@@ -442,8 +469,6 @@ async function run(dir) {
 function agentKeymap(km, layout, actions) {
   const profile = km.profiles[km.activeProfileId ?? 0], rows = profile.layers[0].layout.keymap;
   if (rows.length !== layout.length || rows.some((r, i) => r.length !== layout[i].length)) throw new Error("layout shape does not match the pad's keymap");
-  const flat = layout.flat().map((k) => (Array.isArray(k) ? "chord" : k));
-  for (const k of Object.values(actions)) if (!flat.includes("KV_OAI_" + k)) throw new Error(`actions.${k} is not in layout`);
   km.macros = (km.macros || []).filter((m) => !/^cm2d /.test(m.name)); // ours are regenerated every time; the user's stay
   let nextId = Math.max(0, ...km.macros.map((m) => m.id)) + 1;
   layout.forEach((r, i) => r.forEach((k, j) => {
@@ -453,6 +478,7 @@ function agentKeymap(km, layout, actions) {
     km.macros.push({ id, name: `cm2d ${k.join("+")}`, actions: [...mods.map((kc) => ({ kc, delay: 0, act: 1 })), { kc: last, delay: 0, act: 2 }, ...mods.slice().reverse().map((kc) => ({ kc, delay: 0, act: 0 }))] });
     rows[i][j] = `KA_A${id}`;
   }));
+  for (const k of Object.values(actions)) if (!rows.flat().includes("KV_OAI_" + k)) throw new Error(`actions.${k} is not on layer 1 after applying the layout`);
   const used = new Set(profile.layers.flatMap((l) => l.layout.keymap.flat()).map((k) => /^KA_A(\d+)$/.exec(k || "")?.[1]).filter(Boolean).map(Number));
   km.macros = km.macros.filter((m) => used.has(m.id) || !/^cm2d /.test(m.name));
   profile.macrosUsed = [...used].sort((a, b) => a - b);
@@ -488,7 +514,7 @@ async function main(argv) {
     case "run": return run(dir);
     case "stop": return stopDaemon(dir, cfg.port);
     case "restart": await stopDaemon(dir, cfg.port); return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
-    case "press": return post("/key", { key: argv[1], act: 1 });
+    case "press": return post("/key", { key: argv[1], act: argv[2] === undefined ? 1 : +argv[2] });
     case "install": case "uninstall": return taskCmd(dir, cmd);
     case "state": return console.log(JSON.stringify(JSON.parse(await get("/state")), null, 2));
     case "demo": {

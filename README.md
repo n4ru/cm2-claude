@@ -9,8 +9,8 @@ the pad.
 ```
 row 1   [dial] [AG00] [AG01] [joystick]      agent keys: one Claude Code session each
 row 2   [AG02] [AG03] [AG04] [AG05]          white idle · blue working · amber needs input
-row 3   [ .. ] [APPR] [REJ ] [ .. ]          green done (unread) · red error · selected key breathes
-row 4   [ .. ] [ .. ] [ .. ]                 body ring = most urgent state across all sessions
+row 3   [Esc ] [APPR] [REJ ] [ .. ]          green done (unread) · red error · selected key breathes
+row 4   [TALK] [ .. ] [ .. ]                 body ring = most urgent state across all sessions
 ```
 
 ## How it works
@@ -40,6 +40,49 @@ State per session, in the Codex Micro's own derivation and palette:
 Pressing an agent key selects that session (breathing) and acknowledges green/red
 back to white. The next prompt you type clears them too. With more than six
 sessions, the stalest one gives up its key, idle ones first.
+
+### The state machine
+
+One record per Claude Code session, keyed by `session_id`, driven only by hook
+events. States and their key colours: **off** (no key), **idle** white,
+**working** blue, **awaiting** amber, **unread** green, **error** red.
+
+| From | Event | To |
+|---|---|---|
+| any | `SessionStart` (startup, resume, clear) | idle, gets a key |
+| any | `SessionStart` (compact) | unchanged |
+| any | `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | working |
+| any | `PreToolUse` | working, or awaiting if the tool is `AskUserQuestion` |
+| any | `PermissionRequest` | awaiting, and the prompt is held for the pad |
+| any | `Notification` permission_prompt, elicitation dialogs, agent_needs_input | awaiting |
+| any | `Notification` elicitation complete or response | working |
+| any | `Stop` | unread |
+| any | `StopFailure` | error |
+| unread, error | its agent key pressed | idle (acknowledged); the key is also selected |
+| any | `SessionEnd`, or 12 h without an event | off, key freed |
+
+Pad side: APPR/REJ answer the held prompt of the selected session, else the only
+held one, else nothing; the answered session goes to working. Selection toggles
+on the same key; the selected key breathes. When all six keys are taken, the
+stalest session gives its key up, idle and unread first, then error, working,
+awaiting last. The ring shows the most urgent state present: awaiting > error >
+unread > working > idle (off). Holding TALK turns every non-agent key red until
+release. Daemon side: reconnect loop on any device error or three failed pushes;
+lighting re-sent every 30 s; agent keys re-checked and, if Input is closed,
+restored every 2 min.
+
+### Hold-to-talk
+
+The TALK key is an action key: the daemon gets its press and release and injects
+a keyboard shortcut on the desktop at each edge (`talkKeys`, virtual-key codes,
+default Win+H, and `talkMode`). `"toggle"` taps the chord on press and again on
+release, which opens Windows voice typing while held and closes it after: the
+dictated text lands in whatever has focus, so with the Claude window focused it
+goes into the open session's prompt. `"hold"` keeps the chord pressed for the
+duration, for a push-to-talk hotkey. The Windows Claude app exposes no dictation
+hotkey in its config (its Caps Lock "speak to Claude" feature appears to be the
+macOS quick-entry path); if a later build lists one under Keyboard Shortcuts, put
+its virtual-key codes in `talkKeys` and set `talkMode` to `"hold"`.
 
 Requires pad firmware **0.6.0 or newer** (`node cm2d.js status` prints it; the
 Input app updates firmware). Firmware 0.6 is what put the `v.oai.*` methods on
@@ -72,7 +115,7 @@ does not reach the daemon.
 
 Check: `node cm2d.js state` (or `curl http://desktop:7777/state`), `node cm2d.js demo`
 walks six fake sessions through every colour, `node cm2d.js press AG00` simulates
-a pad key, `type cm2d.log` on the desktop. The pad commands (`status`, `backup`,
+a pad key (`press ACT10 0` a release), `type cm2d.log` on the desktop. The pad commands (`status`, `backup`,
 `restore`, `setup-keys`) pause the daemon while they own the HID channel and
 resume it afterwards.
 
@@ -93,8 +136,8 @@ Only `run` and `X` talk to cm2d (that is `actions` in the config, ACT07/ACT08).
 plain keycode (`"KC_ESC"`), a chord written to the pad as a macro
 (`["KC_LGUI","KC_H"]` = Win+H: modifiers held, last key clicked, released), or
 `null` to keep whatever is on the pad. Defaults: Esc on row 3 left (interrupts
-Claude when the app is focused), Win+H on row 4 left (Windows voice typing, the
-Codex mic key's job), the rest inert so the pad never types stray letters. Add
+Claude when the app is focused), the TALK action key on row 4 left, the rest
+inert so the pad never types stray letters. Add
 `["KC_LCTL","KC_N"]` or whatever you like and re-run `setup-keys`; macros cm2d
 made are regenerated each time, macros you built in Input are left alone.
 Icons are cosmetic; the switch positions are what matters.
@@ -103,7 +146,7 @@ Icons are cosmetic; the switch positions are what matters.
 
 Optional `daemon/config.json`, any subset of the defaults at the top of `cm2d.js`:
 `port`, `holdMs` (0 disables pad approvals), `brightness`, `colors`, `layout`
-(what `setup-keys` writes), `ambient`
+(what `setup-keys` writes), `talkKeys`/`talkMode` (hold-to-talk), `ambient`
 (per-state body ring effect; `idle: {effect: "off"}` mirrors Codex, or give it a
 colour), `keys` (backlight of the non-agent keys: `"off"` by default so the
 status keys pop, like Codex; `"keymap"` for the pad's stored backlight; or an
