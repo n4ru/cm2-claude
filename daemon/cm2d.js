@@ -63,8 +63,8 @@ const DEFAULTS = {
   // "toggle" taps the chord on press and again on release (Windows voice typing, Win+H: opens, then closes).
   // "hold" presses the chord down on press and lifts it on release (a push-to-talk hotkey such as Claude's dictation shortcut).
   talkKeys: [0x5b, 0x48], talkMode: "toggle",
-  focusOnPress: true,   // agent key press brings the Claude desktop app to the front (raise), and fires the
-                        // claude://code/continue deep link to open that exact session (inert until Anthropic ungates it)
+  focusOnPress: true,   // agent key press switches the desktop app to that session in the background (accessibility
+                        // Invoke on the sidebar row, no focus steal); double-tap the key raises the window
   flashMs: 4000,        // after a selection change the other keys flash the selected session's colour, as Codex does
   // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
   // a plain keycode types that key, an ARRAY is a chord written as an on-pad macro (modifiers held, last key
@@ -94,6 +94,7 @@ const DEFAULTS = {
   doubleTapMs: 350,     // second tap on the same agent key within this raises the Claude window; also the mic latch window
   focusDowngrade: true, // Codex: the selected session's green (done, unread) turns white while the Claude window is focused
   ambientMode: "urgent",// ring = most urgent state of any session. "codex": only the selected session working (blue snake), else off
+  followDesktop: true,  // the breathing "selected" key follows whichever session the desktop app is showing (read over accessibility, ~2 s), even when you switch by clicking or Ctrl+Tab
   peers: [],            // other daemons to announce to / look for besides the tailnet peers, e.g. ["http://100.124.22.74:7777"] (a machine Tailscale can't list, such as WSL)
 };
 /** Which encoders / joystick / lights setup-keys writes, honouring the dial and stick modes. The encoder order is the
@@ -111,7 +112,7 @@ function loadConfig(dir) {
 }
 const mergeConfig = (user) => ({ ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions }, stick: { ...DEFAULTS.stick, ...user.stick } });
 
-const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode"];
+const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs", "focusDowngrade", "ambientMode", "followDesktop"];
 const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions", "dial", "stick"];
 /** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
  *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
@@ -200,6 +201,30 @@ const raiseClaude = () => inject("raise");
 const openUrl = (u) => inject("open " + u);
 const foreground = (cb) => { if (process.platform !== "win32") return cb(""); fgWaiters.push(cb); inject("fg"); };
 const VK = { up: 0x26, down: 0x28, enter: 0x0d, esc: 0x1b };
+// A second long-lived PowerShell that reports which session the desktop app is showing, so the pad can breathe that
+// key even when the user switches by clicking or Ctrl+Tab. It reads the toolbar's "<title>, rename session" button
+// (caching it; re-finding when it goes stale). Reads only, never acts, so it can never disturb anything.
+const UIA_PS = `Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+$AE=[System.Windows.Automation.AutomationElement];$TS=[System.Windows.Automation.TreeScope];$CT=[System.Windows.Automation.ControlType]
+$script:win=$null;$script:btn=$null
+function FindWin { $root=$AE::RootElement; foreach($pr in (Get-Process claude -ErrorAction SilentlyContinue|?{$_.MainWindowHandle -ne 0})){ $c=New-Object System.Windows.Automation.PropertyCondition($AE::NativeWindowHandleProperty,[int]$pr.MainWindowHandle); $w=$root.FindFirst($TS::Children,$c); if($w){return $w} }; return $null }
+function Cur {
+  if($script:btn){ try{ $n=$script:btn.Current.Name; if($n -match '^(.*), rename session$'){return $Matches[1]} }catch{ $script:btn=$null } }
+  if(-not $script:win){ $script:win=FindWin }; if(-not $script:win){ return "" }
+  try{ $c=New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::Button); foreach($b in $script:win.FindAll($TS::Descendants,$c)){ $n=$b.Current.Name; if($n -match '^(.*), rename session$'){ $script:btn=$b; return $Matches[1] } } }catch{ $script:win=$null }
+  return "" }
+while($l=[Console]::In.ReadLine()){ if($l -eq "cur"){ [Console]::Out.WriteLine("cur "+(Cur)); [Console]::Out.Flush() } }`;
+let curProc = null; const curWaiters = [];
+function reader() {
+  if (curProc && curProc.exitCode === null) return curProc;
+  curProc = spawn("powershell", ["-NoProfile", "-EncodedCommand", Buffer.from(UIA_PS, "utf16le").toString("base64")], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  curProc.on("error", (e) => log("uia reader:", e.message));
+  let buf = "";
+  curProc.stdout.on("data", (d) => { buf += d; const lines = buf.split(/\r?\n/); buf = lines.pop(); for (const l of lines) { const m = /^cur (.*)$/.exec(l); if (m) { const w = curWaiters.shift(); if (w) w(m[1].trim()); } } });
+  return curProc;
+}
+/** cb(currentSessionTitle) — "" when unknown / off Windows. At most one query in flight is enough for a 2 s poll. */
+function currentSession(cb) { if (process.platform !== "win32") return cb(""); if (curWaiters.length > 3) return cb(""); curWaiters.push(cb); reader().stdin.write("cur\n"); }
 /** Codex's stick sectors (angle in turns, 0 = right). */
 const sectorOf = (a) => (a >= 0.625 && a < 0.875 ? "up" : a >= 0.125 && a < 0.375 ? "down" : a >= 0.375 && a < 0.625 ? "left" : "right");
 /** The Codex mic key, four states, one threshold: hold = record while held; tap, then tap again within t = latched
@@ -241,9 +266,18 @@ function desktopSession(cliId, dir = SESSIONS_DIR) {
   } catch { /* store missing or unreadable: no focus, no titles */ }
   return null;
 }
-function openInClaude(localId) {
-  if (process.platform !== "win32") return log("openInClaude (no-op off Windows):", localId);
-  openUrl(`claude://code/continue?session=${localId}`);   // Start-Process hands the deep link to the already-running app
+// The desktop app has no deep link to focus an existing local/SSH session, so we switch to it the way a screen reader
+// would: uia.ps1 opens the sidebar if needed and Invokes that session's row (UI Automation) by its title. ONE bounded
+// action, never a loop, and it does not steal foreground focus. A rapid re-press is ignored while one is in flight.
+let switching = false;
+function jumpToSession(title) {
+  if (process.platform !== "win32" || !title || switching) return;
+  switching = true;
+  const ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), "select", title], { windowsHide: true });
+  let out = ""; const to = setTimeout(() => { try { ps.kill(); } catch { /* gone */ } }, 8000);
+  ps.stdout.on("data", (d) => (out += d)); ps.stderr.on("data", () => {});
+  ps.on("close", () => { clearTimeout(to); switching = false; log(`switch "${String(title).slice(0, 30)}": ${out.replace(/\r/g, "").trim().split("\n").pop() || "?"}`); });
+  ps.on("error", (e) => { clearTimeout(to); switching = false; log("switch failed: " + e.message); });
 }
 const loopback = (req) => /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || "");
 
@@ -641,10 +675,10 @@ async function run(dir) {
     log(`key AG0${slot} -> select ${s ? s.id.slice(0, 8) : "none"}`);
     if (s) {
       if (engine.selected !== before && cfg.flashMs) { flash = { until: Date.now() + cfg.flashMs, color: cfg.colors[s.state] }; setTimeout(() => schedule(), cfg.flashMs + 50); }
-      if (cfg.focusOnPress) {                                   // bring the Claude window to the front now; the deep link
-        const d = desktopSession(s.id);                         // navigates to this exact session once Anthropic ungates it
-        if (d) { openInClaude(d.localId); log(`  raising "${d.title}"`); } else log("  no desktop session mapping; raising the window");
-        raiseClaude();
+      if (cfg.focusOnPress) {                                   // background switch via the accessibility tree; no focus steal (double-tap raises the window)
+        const d = desktopSession(s.id);
+        if (d && d.title) { log(`  switching desktop to "${d.title}"`); jumpToSession(d.title); }
+        else log("  no desktop title; cannot switch to it");
       }
     }
     schedule();
@@ -691,6 +725,14 @@ async function run(dir) {
         return fs.readFile(path.join(__dirname, "ui.html"), (e, html) => { if (e) { res.writeHead(404); return res.end("ui.html missing"); } res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); res.end(html); });
       }
       if (req.method === "GET" && req.url === "/config") return respond(res, { config: cfg, keymap: keymapSummary(lastKeymap) });
+      if (req.method === "GET" && req.url.startsWith("/uia")) {   // diagnostic/feature: read or click the app's accessibility tree
+        if (!loopback(req)) { res.writeHead(403); return res.end(); }
+        const q = new URL(req.url, "http://x").searchParams, ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), q.get("mode") || "dump", q.get("target") || ""], { windowsHide: true });
+        let out = ""; const to = setTimeout(() => ps.kill(), 20000);
+        ps.stdout.on("data", (d) => (out += d)); ps.stderr.on("data", (d) => (out += d));
+        ps.on("close", () => { clearTimeout(to); respond(res, { out }); }); ps.on("error", (e) => { clearTimeout(to); respond(res, { error: e.message }); });
+        return;
+      }
       if (req.method === "GET" && req.url === "/state") {
         if (!pad && host) return proxyGet(host + "/state", res);
         return respond(res, { device, host: pad ? "self" : host, selected: engine.selected, pending: [...holds.keys()], sessions: [...engine.sessions.values()].map((s) => ({ ...s, cwd: path.basename(s.cwd || ""), title: desktopSession(s.id)?.title })) });
@@ -749,6 +791,12 @@ async function run(dir) {
     const f = name === "claude"; if (f === claudeFocused) return; claudeFocused = f;
     if (f && cfg.focusDowngrade && engine.downgradeSelected()) { log("Claude focused: selected session read"); schedule(); }
   }), 1000);
+  // breathe the key of whatever session the desktop is showing (catches manual clicks / Ctrl+Tab, not just pad presses)
+  if (process.platform === "win32") setInterval(() => { if (!cfg.followDesktop || dimmed) return; currentSession((title) => {
+    if (!title) return;
+    const sess = [...engine.sessions.values()].find((x) => desktopSession(x.id)?.title === title);
+    if (sess && engine.selected !== sess.id) { engine.selected = sess.id; log(`desktop showing "${title.slice(0, 30)}" -> breathe ${sess.id.slice(0, 8)}`); schedule(); }
+  }); }, 2000);
   setTimeout(findHost, 1500);
   setInterval(() => { if (pad) announce(true); else findHost(); }, 60000);
   setInterval(async () => {
