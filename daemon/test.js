@@ -134,14 +134,6 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   assert.throws(() => agentKeymap(km, [["KC_A"]], DEFAULTS.actions), /shape/);       // wrong pad
   assert.throws(() => agentKeymap(km, DEFAULTS.layout, { approve: "ACT06", reject: "ACT08", talk: "ACT10" }), /ACT06/); // action key missing from layout
 }
-// launcher: the command handed to cmd /c must be wrapped in one outer pair of quotes (cmd strips the first and last)
-{
-  const { writeLauncher } = require("./cm2d.js"), os = require("os");
-  const tmp = require("fs").mkdtempSync(require("path").join(os.tmpdir(), "cm2vbs-"));
-  const vbs = require("fs").readFileSync(writeLauncher(tmp, require("path").join(tmp, "cm2d.vbs")), "utf8");   // never the real launcher
-  const cmd = /Run "(.*)", 0, False/.exec(vbs)[1].replace(/""/g, '"');
-  assert.ok(cmd.startsWith('cmd /c ""') && cmd.endsWith('2>&1"'), cmd);
-}
 // pidfile guard: missing file -> 0, dead pid -> not alive, our own pid -> alive
 { const os = require("os"), fs = require("fs"), p = require("path");
   const d = fs.mkdtempSync(p.join(os.tmpdir(), "cm2d-")); assert.equal(readPid(d), 0);

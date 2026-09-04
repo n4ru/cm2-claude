@@ -137,7 +137,8 @@ function homeDir() {
   for (const f of fs.readdirSync(__dirname)) if ((f === "config.json" || f === "sessions.json" || /^keymap\..*\.json$/.test(f)) && !fs.existsSync(path.join(home, f))) { try { fs.copyFileSync(path.join(__dirname, f), path.join(home, f)); } catch { /* read-only code dir: fine */ } }
   return home;
 }
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+let logStream = null;   // run() points this at the state-folder cm2d.log, so the daemon logs itself with no shell redirection (no .vbs)
+const log = (...a) => { const line = new Date().toISOString().slice(11, 19) + " " + a.join(" "); console.log(line); if (logStream) { try { logStream.write(line + "\n"); } catch { /* fine */ } } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- single instance
@@ -507,9 +508,9 @@ function zone(z, fallbackColor, fallbackBrightness) {
 // ---------------------------------------------------------------- daemon
 async function run(dir) {
   const cfg = loadConfig(dir);
+  try { logStream = fs.createWriteStream(path.join(dir, "cm2d.log"), { flags: "a" }); } catch { /* fine */ } // the daemon writes its own log
   if (await stopDaemon(dir, cfg.port)) await sleep(500);
   fs.writeFileSync(pidfile(dir), String(process.pid));
-  if (process.platform === "win32") { try { writeLauncher(dir); } catch { /* read-only code dir */ } } // keep the launchers pointing at this copy
   process.on("uncaughtException", (e) => log("crash guard:", e.stack || e)); // one bad request or odd key event must not end a weeks-long run
   const engine = new Engine(cfg);
   const stateFile = path.join(dir, "sessions.json");   // survives restarts; the 12 h sweep still applies on load
@@ -905,34 +906,22 @@ function agentKeymap(km, layout, actions, extras = {}) {
 }
 
 // ---------------------------------------------------------------- windows autostart
-/** Hidden launcher for the logon task. The whole command is wrapped in one extra pair of quotes:
- *  `cmd /c "..."` strips the first and last quote it sees, which would otherwise break the quoted node path. */
-function writeLauncher(dir, vbs = path.join(__dirname, "cm2d.vbs")) {   // next to the code; the log goes to the state folder
-  const cmd = `cmd /c ""${process.execPath}" "${__filename}" run >> "${path.join(dir, "cm2d.log")}" 2>&1"`;
-  const text = `CreateObject("WScript.Shell").Run "${cmd.replace(/"/g, '""')}", 0, False\r\n`;
-  fs.writeFileSync(vbs, text);
-  // a second copy at a FIXED path (%APPDATA%\cm2-claude\cm2d.vbs), so another machine can start this daemon over ssh
-  // without knowing which copy of the code (plugin cache, checkout) it lives in: ssh desktop 'wscript "%APPDATA%\cm2-claude\cm2d.vbs"'
-  const fixed = path.join(dir, "cm2d.vbs"); if (fixed !== vbs) { try { fs.writeFileSync(fixed, text); } catch { /* fine */ } }
-  return vbs;
-}
 /** Start the daemon detached from this process: the logon task on Windows (it must live in the interactive session to
  *  inject keys), a plain detached node elsewhere. No-op if one is already running. */
 function startDetached(dir, cfg) {
   const pid = readPid(dir);
   if (alive(pid) && pid !== process.pid && isCm2d(pid)) return log(`cm2d already running (pid ${pid})`);
   if (process.platform === "win32") {
-    try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ } return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task */ }
-    return spawn("wscript.exe", [writeLauncher(dir)], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ } return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task yet */ }
+    return taskCmd(dir, "install");   // no task yet: create it (the task runs node directly, no launcher .vbs)
   }
-  const out = fs.openSync(path.join(dir, "cm2d.log"), "a");
-  spawn(process.execPath, [__filename, "run"], { detached: true, stdio: ["ignore", out, out], env: process.env }).unref();
+  spawn(process.execPath, [__filename, "run"], { detached: true, stdio: "ignore", env: process.env }).unref();  // the daemon writes its own log
   log(`started cm2d (log ${path.join(dir, "cm2d.log")})`);
 }
 function taskCmd(dir, action) {
   if (action === "install") {
-    writeLauncher(dir);   // the task runs the FIXED copy (%APPDATA%\cm2-claude\cm2d.vbs), so a plugin update never strands it
-    execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", `wscript.exe "${path.join(dir, "cm2d.vbs")}"`], { stdio: "inherit" });
+    const tr = `"${process.execPath}" "${__filename}" run`;   // the task runs node directly; the daemon writes its own log (no .vbs)
+    execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", tr], { stdio: "inherit" });
     execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
   } else {
     try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ }
@@ -1006,5 +995,5 @@ async function main(argv) {
   }
 }
 
-module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, writeLauncher, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, padExtras, sectorOf, Ptt, peerIps, announcedUrl, request, run, EFFECT, DEFAULTS };
+module.exports = { Pad, frame, Engine, zone, agentKeymap, applyConfigPatch, homeDir, readPid, alive, isCm2d, normalizeEvent, desktopSession, padExtras, sectorOf, Ptt, peerIps, announcedUrl, request, run, EFFECT, DEFAULTS };
 if (require.main === module) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

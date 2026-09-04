@@ -24,11 +24,9 @@ case "$(uname -s)" in
     root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
     cd "$root/daemon" || exit 0
     [ -d node_modules/node-hid ] || npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || exit 0
-    if schtasks //Query //TN cm2d >/dev/null 2>&1; then schtasks //Run //TN cm2d >/dev/null 2>&1
-    elif [ -z "$CM2_NO_AUTOSTART" ]; then node cm2d.js install >/dev/null 2>&1
-    else  # detached start from this session (no console or pipes inherited); logs to the state folder
-      node -e "const m=require('./cm2d.js');m.writeLauncher(m.homeDir())" >/dev/null 2>&1 || exit 0
-      wscript.exe "$(cygpath -w "$root/daemon/cm2d.vbs")"
+    if schtasks //Query //TN cm2d >/dev/null 2>&1; then schtasks //End //TN cm2d >/dev/null 2>&1; schtasks //Run //TN cm2d >/dev/null 2>&1
+    elif [ -z "$CM2_NO_AUTOSTART" ]; then node cm2d.js install >/dev/null 2>&1                 # logon task runs node directly (no .vbs)
+    else node -e "require('child_process').spawn(process.execPath,[require('path').resolve('cm2d.js'),'run'],{detached:true,stdio:'ignore',windowsHide:true}).unref()" >/dev/null 2>&1  # detached, no task; daemon self-logs
     fi ;;
   *)
     # revive the Windows host over ssh if ~/.config/cm2-claude/ssh names it

@@ -7,3 +7,6 @@ config.json
 *.vbs
 keymap.after*.json
 sessions.json
+daemon/cm2d.vbs
+daemon/cm2d.log
+daemon/cm2d.pid
