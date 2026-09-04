@@ -11,7 +11,9 @@ if(-not $win){"NO_WINDOW";exit 1}
 function ByName($n){ New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty,$n) }
 function InvokeEl($el){
   try{ $p=$el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); $p.Invoke(); return "INVOKED" }catch{}
+  try{ $p=$el.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern); $p.Toggle(); return "TOGGLED" }catch{}
   try{ $p=$el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern); $p.Select(); return "SELECTED" }catch{}
+  try{ $p=$el.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern); $p.DoDefaultAction(); return "DEFAULTACTION" }catch{}
   return $null
 }
 function OpenSidebar {
@@ -35,6 +37,20 @@ if($mode -eq "select"){
   $best = $cands | Where-Object { $_.Current.Name.Substring(0, $_.Current.Name.Length - $target.Length - 1) -notmatch " " } | Select-Object -First 1
   if(-not $best){ $best = $cands | Select-Object -First 1 }
   if($best){ $r=InvokeEl $best; if($r){"$r [$($best.Current.Name)]"; exit 0} }
+  "NOTFOUND"; exit 3
+}
+if($mode -eq "invoke"){
+  # click a control by exact accessible name (Send, Dictate, "Fork from here", ...) via UI Automation; a menu item ("Fork
+  # from here") may sit behind a "More options" button we open first. Exact-name match, first hit wins.
+  if(-not $target){"NO_TARGET";exit 2}
+  $btnCond=New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::Button)
+  $found=$false
+  foreach($b in $win.FindAll($TS::Descendants,$btnCond)){ if($b.Current.Name -eq $target){ $found=$true; $r=InvokeEl $b; if($r){"$r"; exit 0} } }
+  # not visible: open the newest row's "More options" menu, then retry
+  $more = $win.FindAll($TS::Descendants,$btnCond) | Where-Object { $_.Current.Name -like "More options for*" } | Select-Object -Last 1
+  if($more){ [void](InvokeEl $more); Start-Sleep -Milliseconds 350
+    foreach($b in $win.FindAll($TS::Descendants,$btnCond)){ if($b.Current.Name -eq $target){ $found=$true; $r=InvokeEl $b; if($r){"$r"; exit 0} } } }
+  if($found){"FOUND_NO_PATTERN"; exit 4}
   "NOTFOUND"; exit 3
 }
 if($mode -eq "current"){

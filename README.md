@@ -233,7 +233,8 @@ plays one too, though its exact frames aren't public, so this one is our own.
 
 | Codex | here |
 |---|---|
-| **Dial** turns move the highlight (Arrow Up / Down), click is Enter, hold 500 ms opens settings; using it puts the pad in "navigating": blue snake ring, and AG00 turns red and acts as Escape | `dial: "navigate"`: identical, hold opens this configurator; "navigating" lasts 2 s after the last dial event (Codex knows when a menu is open; we don't). `dial: "keymap"` restores plain keycodes from `encoders` |
+| **Dial** has four modes: composer navigation, reasoning only, conversation scrolling, custom | matched: `dial: "navigate"` (Arrow Up/Down, click Enter, "navigating" window = blue snake + AG00 red = Esc), `"reasoning"` (click opens the effort menu, turn adjusts), `"scroll"` (Page Up/Down, click jumps to the latest message), `"custom"` (`dialCustom` sets keys for turn/press and the long-press). Plus `"volume"`, and `"keymap"` (the pad sends `encoders`). Hold opens this configurator in every mode except custom |
+| **Command keys** run a chosen action or skill | a key can send a chord or keycode, type text, or **invoke a Claude control directly** (Send, Fork from here, Dictate) through the accessibility tree, plus the daemon roles approve/reject/talk. The configurator's preset menu fills common shortcuts, so no manual typing of slash commands |
 | **Stick** fires one command per push past half deflection, re-arms at rest; up plan mode, down sidebar, left back, right forward | `stick.mode: "vendor"` with the same deadzones and edge trigger; each direction is a chord of virtual-key codes. Defaults are the Claude desktop app's documented Code-tab shortcuts: **left/right cycle to the previous/next session in the sidebar** (Ctrl+Shift+Tab / Ctrl+Tab — this is how you switch sessions from the pad today), up cycles the transcript view modes (Ctrl+O), down toggles the terminal pane (Ctrl+`). `"keymap"` restores `joystick` |
 | **Agent keys** show the six most recently updated threads, most recent first | `agentSource: "recent"` (keys re-sort as sessions become active) or `"sticky"` (a session keeps its key) |
 | single tap opens the thread in the background, double tap within 350 ms also raises the window | `focusOnPress`: a tap switches the desktop to that session in the background via UI Automation (no deep link exists for local sessions); double tap within `doubleTapMs` switches and raises the window |
@@ -286,7 +287,10 @@ goes into the open session's prompt. The ring mirrors Codex's mic lighting: a
 sea-green light moves around it while you record, a white light moves while the
 speech is processed, then it goes solid white when the prompt is ready to send.
 (Windows voice typing types live, so the processing and ready phases are a short
-timed sequence after you release, not a real transcription signal.) `"hold"` keeps the chord pressed
+timed sequence after you release, not a real transcription signal.) `talkMode: "dictate"` instead
+drives Claude's OWN microphone: it clicks the composer's Dictate button through the accessibility tree
+(no Windows voice typing, no typed commands), so the transcript goes straight into the focused session.
+`"hold"` keeps the chord pressed
 for the duration, for a push-to-talk hotkey. The Windows Claude app exposes no
 dictation hotkey in its config (its Caps Lock "speak to Claude" feature appears
 to be the macOS quick-entry path); if a later build lists one under Keyboard

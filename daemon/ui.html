@@ -110,6 +110,9 @@
           <option value="approve">approve</option>
           <option value="reject">reject</option>
           <option value="talk">talk</option>
+          <option value="send">send the message</option>
+          <option value="fork">fork from here</option>
+          <option value="dictate">dictate (Claude's mic)</option>
           <option value="chord">chord (VK ints)</option>
           <option value="text">type text</option>
           <option value="raise">raise the Claude window</option>
@@ -130,9 +133,11 @@
       <div class="row">
         <label class="f"><span>Dial</span>
           <select id="dialMode">
-            <option value="navigate">navigate — Arrow Up / Down / Enter (Codex composer nav)</option>
-            <option value="scroll">scroll — Page Up / Down</option>
+            <option value="navigate">navigate — composer nav (Arrow Up / Down / Enter)</option>
+            <option value="reasoning">reasoning — click opens the effort menu, turn adjusts</option>
+            <option value="scroll">scroll — Page Up / Down, click jumps to latest</option>
             <option value="volume">volume — Volume Up / Down / Mute</option>
+            <option value="custom">custom — your own keys per turn / press / long press</option>
             <option value="keymap">keymap — the pad sends keycodes</option>
           </select>
         </label>
@@ -148,6 +153,16 @@
         <div class="row">
           <label class="f"><span>press</span><input id="encPress" class="mid" list="kcs" spellcheck="false"></label>
           <label class="chk"><input type="checkbox" id="encKeep"> keep</label>
+        </div>
+      </div>
+      <div id="dialCustom" hidden>
+        <div class="row">
+          <label class="f"><span style="min-width:76px">clockwise</span><input id="dc_cw" class="num mono" spellcheck="false" placeholder="38"></label>
+          <label class="f"><span style="min-width:76px">counter-cw</span><input id="dc_cc" class="num mono" spellcheck="false" placeholder="40"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span style="min-width:76px">press</span><input id="dc_clk" class="num mono" spellcheck="false" placeholder="13"></label>
+          <label class="f"><span style="min-width:76px">long press</span><input id="dc_long" class="num mono" spellcheck="false" placeholder="17, 79"></label>
         </div>
       </div>
       <div class="row" style="margin-top:12px">
@@ -205,7 +220,7 @@
       <span class="hint" style="margin-top:0">lights off after inactivity; any key, stick or status change wakes them</span>
     </div>
     <div class="row">
-      <label class="f"><span>talkMode</span><select id="talkMode"><option value="toggle">toggle</option><option value="hold">hold</option></select></label>
+      <label class="f"><span>talkMode</span><select id="talkMode"><option value="toggle">toggle (Win+H)</option><option value="hold">hold (Win+H)</option><option value="dictate">dictate — Claude's own mic</option></select></label>
       <label class="f"><span>talkKeys</span><input id="talkKeys" class="mid mono" spellcheck="false" placeholder="91, 72"></label>
       <label class="chk"><input type="checkbox" id="focusOnPress"> key press switches the desktop app to that session (background; double-tap also raises the window)</label>
     </div>
@@ -277,14 +292,16 @@ const EFFECTS = ["off", "solid", "snake", "rainbow", "breath", "gradient"];
 const DEFC = { idle: 0xffffff, working: 0x304ffe, awaiting: 0xff6d00, unread: 0x00ff4c, error: 0xff0033 };
 const EDITABLE = ["brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode",
                   "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights",
-                  "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs",
+                  "dial", "dialCustom", "stick", "actionKeys", "autoDimMs", "agentSource", "doubleTapMs",
                   "focusDowngrade", "ambientMode", "followDesktop", "pins"];
 const DIRS = ["up", "down", "left", "right"];
 const DIMS = [[0, "Off"], [30000, "30 seconds"], [60000, "1 minute"], [180000, "3 minutes"],
               [600000, "10 minutes"], [1800000, "30 minutes"], [3600000, "1 hour"]];
 const DIAL_HINT = {
   navigate: "Codex composer nav: turn = Arrow Up / Down, click = Enter, hold 500 ms = open this configurator. Using it makes the pad 'navigating' for 2 s (blue ring, AG00 = Esc). The daemon injects; the keycodes below are ignored.",
-  scroll: "Turn = Page Up / Down, click = Enter, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
+  scroll: "Turn = Page Up / Down, click = jump to the latest message, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
+  reasoning: "Click opens the effort menu (Ctrl+Shift+E), turn adjusts within it, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
+  custom: "Your own virtual-key codes for clockwise / counter-clockwise / press / long-press (below). Hold runs the long-press instead of opening settings.",
   volume: "Turn = Volume Up / Down, click = Mute, hold = open this configurator. The daemon injects; the keycodes below are ignored.",
   keymap: "The pad sends these keycodes itself.",
 };
@@ -334,6 +351,9 @@ function edActKind(id) {
     if (Array.isArray(v.chord)) return "chord";
     if (typeof v.text === "string") return "text";
     if (v.raise) return "raise";
+    if (v.invoke === "Send") return "send";
+    if (v.invoke === "Fork from here") return "fork";
+    if (v.invoke === "Dictate") return "dictate";
     if (v.open) return "open";
   }
   return "none";
@@ -466,7 +486,7 @@ function renderForms() {
   $("flashMs").value = cfg.flashMs == null ? 0 : cfg.flashMs;
   const keys = typeof cfg.keys === "string" ? cfg.keys : "custom";
   $("keysZone").innerHTML = opts(typeof cfg.keys === "string" ? ["off", "keymap"] : ["off", "keymap", "custom"], keys);
-  $("talkMode").value = cfg.talkMode === "hold" ? "hold" : "toggle";
+  $("talkMode").value = ["toggle", "hold", "dictate"].includes(cfg.talkMode) ? cfg.talkMode : "toggle";
   $("talkKeys").value = Array.isArray(cfg.talkKeys) ? cfg.talkKeys.join(", ") : "";
   $("focusOnPress").checked = !!cfg.focusOnPress;
   const a = cfg.actions || {};
@@ -500,7 +520,8 @@ function renderForms() {
     $("lz_" + z + "_speed").value = v.speed == null ? 0.5 : v.speed;
     for (const f of ["effect", "color", "brightness", "speed"]) $("lz_" + z + "_" + f).disabled = !lights;
   }
-  $("dialMode").value = ["navigate", "scroll", "volume", "keymap"].includes(cfg.dial) ? cfg.dial : "navigate";
+  $("dialMode").value = ["navigate", "reasoning", "scroll", "volume", "custom", "keymap"].includes(cfg.dial) ? cfg.dial : "navigate";
+  { const dcu = cfg.dialCustom || {}; for (const it of [["dc_cw", "cw"], ["dc_cc", "cc"], ["dc_clk", "clk"], ["dc_long", "long"]]) $(it[0]).value = Array.isArray(dcu[it[1]]) ? dcu[it[1]].join(", ") : ""; }
   const stick = cfg.stick || {};
   $("stickMode").value = stick.mode === "vendor" ? "vendor" : "keymap";
   for (const d of DIRS) $("stk_" + d).value = Array.isArray(stick[d]) ? stick[d].join(", ") : "";
@@ -526,6 +547,7 @@ function syncGating() {
   $("encKeep").disabled = driven;
   for (const id of ["encCw", "encCcw", "encPress"]) $(id).disabled = driven || $("encKeep").checked;
   $("pinsBlock").hidden = $("agentSource").value !== "pinned";
+  $("dialCustom").hidden = dm !== "custom";
   const vend = $("stickMode").value === "vendor";
   $("stickHint").textContent = STICK_HINT[vend ? "vendor" : "keymap"];
   $("stickVendor").hidden = !vend;
@@ -542,6 +564,7 @@ function edActVis(kind) {
   $("edActEnterL").hidden = kind !== "text";
   $("edActHint").textContent = kind === "chord" ? "Windows virtual-key codes, comma separated — e.g. 16, 9 for Shift+Tab."
     : kind === "approve" || kind === "reject" || kind === "talk" ? "This role moves here; whichever key held it before loses it."
+    : kind === "send" || kind === "fork" || kind === "dictate" ? "The daemon clicks that Claude control directly (needs the session's composer on screen)."
     : "";
 }
 function renderEdAct() {
@@ -572,6 +595,9 @@ function commitEdAct() {
     setStatus(""); keys[id] = { chord: nums };
   } else if (kind === "text") keys[id] = { text: $("edActText").value, enter: $("edActEnter").checked };
   else if (kind === "raise") keys[id] = { raise: true };
+  else if (kind === "send") keys[id] = { invoke: "Send" };
+  else if (kind === "fork") keys[id] = { invoke: "Fork from here" };
+  else if (kind === "dictate") keys[id] = { invoke: "Dictate" };
   else if (kind === "open") keys[id] = { open: "config" };
   else delete keys[id];
   cfg.actions = acts;
@@ -701,6 +727,10 @@ function wire() {
   on("autoDimMs", "change", () => { if (cfg) { cfg.autoDimMs = Number($("autoDimMs").value) || 0; touched(); } });
   on("agentSource", "change", () => { if (cfg) { cfg.agentSource = $("agentSource").value; syncGating(); renderPins(); touched(); } });
   on("edPreset", "change", () => { const v = $("edPreset").value; if (!v) return; $("edChord").checked = v.indexOf("+") >= 0; $("edVal").value = v; $("edPreset").value = ""; commitEditor(); });
+  for (const it of [["dc_cw", "cw"], ["dc_cc", "cc"], ["dc_clk", "clk"], ["dc_long", "long"]]) on(it[0], "input", ((k, id) => () => {
+    if (!cfg) return; const nums = parseInts($(id).value); if ($(id).value.trim() && !nums) { setStatus("dial " + k + ": comma-separated integers only", "err"); return; }
+    setStatus(""); cfg.dialCustom = Object.assign({}, cfg.dialCustom); cfg.dialCustom[k] = nums || []; touched();
+  })(it[1], it[0]));
   for (let i = 0; i < 6; i++) on("pin_" + i, "change", ((i) => () => {
     if (!cfg) return; cfg.pins = Object.assign({}, cfg.pins); const v = $("pin_" + i).value;
     for (const k of Object.keys(cfg.pins)) if (k === String(i) || cfg.pins[k] === v) delete cfg.pins[k];   // one session, one key

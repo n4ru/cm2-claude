@@ -81,14 +81,17 @@ const DEFAULTS = {
   joystick: null,   // used when stick.mode = "keymap": {"type": "JOYSTICK", "sectors": []} or {"type": "RADIAL", "sectors": [{"k": "KC_UP", "a1": 0.625, "a2": 0.875}, ...]}
   lights: null,     // the pad's own stored lighting when nothing drives it, e.g. {"backlight": {"effect": "solid", "brightness": 1, "speed": 0.5, "magic": 1, "color": 16777215}, "underglow": {...}}
   // ---- the Codex Micro behaviours (from the ChatGPT app's own layout), all on by default
-  dial: "navigate",     // daemon-driven dial modes: "navigate" (Arrow Up/Down/Enter; puts the pad in "navigating" for 2 s: blue snake, AG00=Esc),
-                        // "scroll" (Page Up/Down/Enter), "volume" (Vol Up/Down/Mute). "keymap" = the pad sends `encoders` itself. Click always = the mode's press; hold 500 ms opens the configurator.
+  dial: "navigate",     // Codex's four modes: "navigate" (Composer navigation: Arrow Up/Down, click selects; "navigating" window = blue snake + AG00=Esc),
+                        // "reasoning" (click opens the effort menu, turn adjusts), "scroll" (Conversation scrolling: Page Up/Down, click jumps to the latest),
+                        // "custom" (cfg.dialCustom drives CW/CC/click and the 500 ms hold). Plus "volume", and "keymap" (the pad sends `encoders`). Hold opens the configurator in every mode except custom.
+  dialCustom: { cw: [], cc: [], clk: [], long: [] },  // dial = "custom": virtual-key codes for clockwise, counter-clockwise, click, and the 500 ms long-press
   // vendor = the daemon reads the stick, fires one shortcut per push past half deflection, re-arms at rest. "keymap" = `joystick`.
   // Defaults are the Claude desktop app's documented Code-tab shortcuts: left/right cycle sessions in the sidebar
   // (Ctrl+Shift+Tab / Ctrl+Tab — this is how you jump between sessions from the pad today), up cycles the transcript
   // view modes (Ctrl+O), down toggles the terminal pane (Ctrl+`). Windows virtual-key codes; edit freely in the GUI.
   stick: { mode: "vendor", up: [0x11, 0x4f], down: [0x11, 0xc0], left: [0x11, 0x10, 0x09], right: [0x11, 0x09] },
-  actionKeys: {},       // more vendor keys handled here, e.g. {"ACT09": {"chord": [17, 78]}, "ACT12": {"text": "Not sure, use your judgment", "enter": true}, "ACT11": {"raise": true}, "ACT06": {"open": "config"}}
+  actionKeys: {},       // more vendor keys handled here: {"chord":[17,78]} a chord, {"text":"…","enter":true} typed text, {"raise":true} the window,
+                        // {"open":"config"} the configurator, or {"invoke":"Send"} click a Claude control by name (Send, Dictate, "Fork from here")
   autoDimMs: 180000,    // Codex: lights off after 3 min without a key, stick or status change; anything wakes them. 0 = never
   agentSource: "recent",// which sessions hold the six keys: "recent" (most recently active first), "priority" (awaiting/unread first), "sticky" (a session keeps its key until it ends), "pinned" (cfg.pins)
   pins: {},             // agentSource "pinned": { "<slot 0-5>": "<session id>" } — that key always follows that session, its slot reserved even while the session is away
@@ -113,7 +116,7 @@ function loadConfig(dir) {
 }
 const mergeConfig = (user) => ({ ...DEFAULTS, ...user, colors: { ...DEFAULTS.colors, ...user.colors }, ambient: { ...DEFAULTS.ambient, ...user.ambient }, actions: { ...DEFAULTS.actions, ...user.actions }, stick: { ...DEFAULTS.stick, ...user.stick } });
 
-const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "stick", "actionKeys", "autoDimMs", "agentSource", "pins", "doubleTapMs", "focusDowngrade", "ambientMode", "followDesktop"];
+const EDITABLE = ["peers", "brightness", "holdMs", "colors", "ambient", "keys", "actions", "talkKeys", "talkMode", "focusOnPress", "flashMs", "layout", "encoders", "joystick", "lights", "dial", "dialCustom", "stick", "actionKeys", "autoDimMs", "agentSource", "pins", "doubleTapMs", "focusDowngrade", "ambientMode", "followDesktop"];
 const KEYMAP_KEYS = ["layout", "encoders", "joystick", "lights", "actions", "dial", "stick"];
 /** Merge a GUI patch into config.json (deep for the small maps, whole-value otherwise), validate the pad-facing part
  *  against the last keymap seen, and refresh `cfg` in place so every closure sees the new values. Throws on bad input. */
@@ -204,7 +207,13 @@ const openUrl = (u) => inject("open " + u);
 const foreground = (cb) => { if (process.platform !== "win32") return cb(""); fgWaiters.push(cb); inject("fg"); };
 const VK = { up: 0x26, down: 0x28, enter: 0x0d, esc: 0x1b };
 // daemon-driven dial modes: what a clockwise / counter-clockwise / click sends. "keymap" is absent (the pad sends its own encoder keycodes).
-const DIAL_KEYS = { navigate: { cw: [0x26], cc: [0x28], clk: [0x0d] }, scroll: { cw: [0x21], cc: [0x22], clk: [0x0d] }, volume: { cw: [0xaf], cc: [0xae], clk: [0xad] } };
+// Codex's four dial modes (+ volume extra), as CW / CC / click virtual-key codes. "custom" uses cfg.dialCustom; "keymap" absent (the pad sends its own encoder keycodes).
+const DIAL_KEYS = {
+  navigate: { cw: [0x26], cc: [0x28], clk: [0x0d] },              // Composer navigation: Arrow Up/Down move controls, click selects the focused one
+  scroll: { cw: [0x21], cc: [0x22], clk: [0x11, 0x23] },          // Conversation scrolling: Page Up/Down; click = Ctrl+End (jump to the latest message)
+  reasoning: { cw: [0x26], cc: [0x28], clk: [0x11, 0x10, 0x45] }, // Reasoning: click opens the effort menu (Ctrl+Shift+E); turn = Up/Down within it
+  volume: { cw: [0xaf], cc: [0xae], clk: [0xad] },                // extra: Volume Up/Down, click = Mute
+};
 // A second long-lived PowerShell that reports which session the desktop app is showing, so the pad can breathe that
 // key even when the user switches by clicking or Ctrl+Tab. It reads the toolbar's "<title>, rename session" button
 // (caching it; re-finding when it goes stale). Reads only, never acts, so it can never disturb anything.
@@ -274,6 +283,17 @@ function desktopSession(cliId, dir = SESSIONS_DIR) {
 // would: uia.ps1 opens the sidebar if needed and Invokes that session's row (UI Automation) by its title. ONE bounded
 // action, never a loop, and it does not steal foreground focus. A rapid re-press is ignored while one is in flight.
 let switching = false;
+// Click a Claude control by its accessible name (Send, Dictate, "Fork from here", ...) via UI Automation — a direct
+// trigger, no typed commands. Shares the one-op-at-a-time guard with jumpToSession so two UIA actions never overlap.
+function uiaInvoke(name) {
+  if (process.platform !== "win32" || !name || switching) return;
+  switching = true;
+  const ps = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "uia.ps1"), "invoke", name], { windowsHide: true });
+  let out = ""; const to = setTimeout(() => { try { ps.kill(); } catch { /* gone */ } }, 8000);
+  ps.stdout.on("data", (d) => (out += d)); ps.stderr.on("data", () => {});
+  ps.on("close", () => { clearTimeout(to); switching = false; log(`invoke "${String(name).slice(0, 24)}": ${out.replace(/\r/g, "").trim().split("\n").pop() || "?"}`); });
+  ps.on("error", (e) => { clearTimeout(to); switching = false; log("invoke failed: " + e.message); });
+}
 function jumpToSession(title) {
   if (process.platform !== "win32" || !title || switching) return;
   switching = true;
@@ -522,6 +542,7 @@ function zone(z, fallbackColor, fallbackBrightness) {
 async function run(dir) {
   const cfg = loadConfig(dir);
   try { logStream = fs.createWriteStream(path.join(dir, "cm2d.log"), { flags: "a" }); } catch { /* fine */ } // the daemon writes its own log
+  if (process.platform === "win32") { try { writeLauncher(dir); } catch { /* read-only dir */ } } // keep the task's launcher pointing at this copy
   if (await stopDaemon(dir, cfg.port)) await sleep(500);
   fs.writeFileSync(pidfile(dir), String(process.pid));
   process.on("uncaughtException", (e) => log("crash guard:", e.stack || e)); // one bad request or odd key event must not end a weeks-long run
@@ -686,7 +707,8 @@ async function run(dir) {
     const recording = talkPhase === "recording";
     if (on === recording) return;
     clearTimeout(talkTimer);
-    sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (on ? "d" : "u") : "t");
+    if (cfg.talkMode === "dictate") uiaInvoke("Dictate");                         // toggle Claude's own dictation (needs the session's composer on screen)
+    else sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (on ? "d" : "u") : "t");
     if (on) { log("talk: listening"); setPhase("recording"); }                    // sea-green moving
     else { log("talk: stop"); setPhase("processing");                             // white moving...
       talkTimer = setTimeout(() => { setPhase("ready");                           // ...then solid white (prompt ready to send)
@@ -696,13 +718,16 @@ async function run(dir) {
   /** Dial as a cursor (Codex "composer-navigation"): clockwise = previous option, counter-clockwise = next, click = Enter,
    *  hold 500 ms = open the configurator. Any use makes the pad "navigating" for 2 s (blue snake, AG00 red = Escape). */
   function dial(key, act) {
-    const m = DIAL_KEYS[cfg.dial]; if (!m) return;                           // "keymap": the pad sends its own encoder keycodes
+    if (cfg.dial === "keymap") return;                                       // the pad sends its own encoder keycodes
+    const custom = cfg.dial === "custom", m = custom ? (cfg.dialCustom || {}) : DIAL_KEYS[cfg.dial];
+    if (!m) return;
     if (cfg.dial === "navigate") { dialUntil = Date.now() + 2000; clearTimeout(dialTimer); dialTimer = setTimeout(() => schedule(), 2050); }  // the "navigating" window (AG00=Esc) is composer-nav only
-    if (key === "ENC_CW") { sendKeys(m.cw); log(`dial ${cfg.dial}: CW`); }
-    else if (key === "ENC_CC") { sendKeys(m.cc); log(`dial ${cfg.dial}: CC`); }
+    const hit = (a) => { if (a && a.length) sendKeys(a); };
+    if (key === "ENC_CW") { hit(m.cw); log(`dial ${cfg.dial}: CW`); }
+    else if (key === "ENC_CC") { hit(m.cc); log(`dial ${cfg.dial}: CC`); }
     else if (key === "ENC_CLK") {
-      if (act === 1) { encConsumed = false; clearTimeout(encHold); encHold = setTimeout(() => { encConsumed = true; openUrl(url()); log("dial held: configurator"); }, 500); }
-      else if (act === 0) { clearTimeout(encHold); if (!encConsumed) sendKeys(m.clk); }
+      if (act === 1) { encConsumed = false; clearTimeout(encHold); encHold = setTimeout(() => { encConsumed = true; if (custom && m.long && m.long.length) { hit(m.long); log("dial hold: custom long-press"); } else { openUrl(url()); log("dial held: configurator"); } }, 500); }  // Codex: hold = settings, except custom (long-press action)
+      else if (act === 0) { clearTimeout(encHold); if (!encConsumed) hit(m.clk); }
     }
     schedule();
   }
@@ -735,6 +760,7 @@ async function run(dir) {
     if (a.chord) { sendKeys(a.chord); log(`${key}: chord ${a.chord.join("+")}`); }
     else if (a.text !== undefined) { injectText(a.text, a.enter); log(`${key}: typed "${String(a.text).slice(0, 30)}"${a.enter ? " + Enter" : ""}`); }
     else if (a.raise) { raiseClaude(); log(`${key}: raise Claude`); }
+    else if (a.invoke) { uiaInvoke(a.invoke); log(`${key}: invoke ${a.invoke}`); }
     else if (a.open) { openUrl(url()); log(`${key}: open configurator`); }
   }
   function onKey({ key, act } = {}) {
@@ -927,23 +953,29 @@ function agentKeymap(km, layout, actions, extras = {}) {
 }
 
 // ---------------------------------------------------------------- windows autostart
-/** Start the daemon detached from this process: the logon task on Windows (it must live in the interactive session to
- *  inject keys), a plain detached node elsewhere. No-op if one is already running. */
+/** A hidden PowerShell launcher the logon task points at. A FILE, not an inline /TR command, so schtasks never mangles
+ *  the nested quotes (that dropped the daemon before). node runs as PowerShell's hidden child and writes its own log.
+ *  Regenerated on every run so it tracks this copy of the code; gitignored and never scp'd, so nothing stale rides along. */
+function writeLauncher(dir) {
+  const ps1 = path.join(dir, "cm2d.ps1");
+  fs.writeFileSync(ps1, `& '${process.execPath.replace(/'/g, "''")}' '${__filename.replace(/'/g, "''")}' run\r\n`);
+  return ps1;
+}
 function startDetached(dir, cfg) {
   const pid = readPid(dir);
   if (alive(pid) && pid !== process.pid && isCm2d(pid)) return log(`cm2d already running (pid ${pid})`);
   if (process.platform === "win32") {
     try { execFileSync("schtasks", ["/Query", "/TN", "cm2d"], { stdio: "ignore" }); try { execFileSync("schtasks", ["/End", "/TN", "cm2d"], { stdio: "ignore" }); } catch { /* not running */ } return execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" }); } catch { /* no task yet */ }
-    return taskCmd(dir, "install");   // no task yet: create it (the task runs node directly, no launcher .vbs)
+    return taskCmd(dir, "install");   // no task yet: create it (the task runs the hidden .ps1 launcher)
   }
   spawn(process.execPath, [__filename, "run"], { detached: true, stdio: "ignore", env: process.env }).unref();  // the daemon writes its own log
   log(`started cm2d (log ${path.join(dir, "cm2d.log")})`);
 }
 function taskCmd(dir, action) {
   if (action === "install") {
-    // launch node through a hidden PowerShell so the task shows no console window (node run by the task directly shows one).
-    // node runs as PowerShell's child in its hidden console; the daemon writes its own log, so no shell redirection is needed.
-    const tr = `powershell -NoProfile -WindowStyle Hidden -Command "& '${process.execPath}' '${__filename}' run"`;
+    // the task runs a hidden PowerShell that runs the .ps1 launcher; only the file path is quoted, so schtasks stores it cleanly.
+    writeLauncher(dir);
+    const tr = `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${path.join(dir, "cm2d.ps1")}"`;
     execFileSync("schtasks", ["/Create", "/F", "/TN", "cm2d", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", tr], { stdio: "inherit" });
     execFileSync("schtasks", ["/Run", "/TN", "cm2d"], { stdio: "inherit" });
   } else {
