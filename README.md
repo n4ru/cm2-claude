@@ -89,12 +89,14 @@ row 4   [mic/globe]   [⊞ or ★]     [smiley]                     voice = Win+
 ```
 
 Only `run` and `X` talk to cm2d (that is `actions` in the config, ACT07/ACT08).
-`setup-keys` writes the whole of layer 1 from `layout` in the config: by default
-the spare key on row 3 is Esc (interrupts Claude when the app is focused) and the
-other spares are inert, so the pad never types stray letters. Shortcuts that need
-a modifier (Win+H voice typing, Ctrl+N) are Input macros: build those in the Input
-app on the same layer, then put `null` at those positions in `layout` so a later
-`setup-keys` keeps them (or put plain keycodes there and re-run `setup-keys`).
+`setup-keys` writes the whole of layer 1 from `layout` in the config. A cell is a
+plain keycode (`"KC_ESC"`), a chord written to the pad as a macro
+(`["KC_LGUI","KC_H"]` = Win+H: modifiers held, last key clicked, released), or
+`null` to keep whatever is on the pad. Defaults: Esc on row 3 left (interrupts
+Claude when the app is focused), Win+H on row 4 left (Windows voice typing, the
+Codex mic key's job), the rest inert so the pad never types stray letters. Add
+`["KC_LCTL","KC_N"]` or whatever you like and re-run `setup-keys`; macros cm2d
+made are regenerated each time, macros you built in Input are left alone.
 Icons are cosmetic; the switch positions are what matters.
 
 ## Config

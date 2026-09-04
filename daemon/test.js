@@ -68,15 +68,19 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
 {
   const km = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KC_G", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]], encoders: [["KC_VOLU", "KC_VOLD", "KC_MPLY"]] } }] }] };
   const out = agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions).profiles[0].layers[0].layout;
-  assert.deepEqual(out.keymap, [["KV_OAI_AG00", "KV_OAI_AG01"], ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"], ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"], ["KC_NONE", "KC_NONE", "KC_NONE"]]);
+  assert.deepEqual(out.keymap, [["KV_OAI_AG00", "KV_OAI_AG01"], ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"], ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"], ["KA_A1", "KC_NONE", "KC_NONE"]]);
   assert.deepEqual(out.encoders, [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]);              // dial untouched
+  // the chord became an on-pad macro: Win held, H clicked, Win released; profile lists it as used
+  assert.deepEqual(km.macros, [{ id: 1, name: "cm2d KC_LGUI+KC_H", actions: [{ kc: "KC_LGUI", delay: 0, act: 1 }, { kc: "KC_H", delay: 0, act: 2 }, { kc: "KC_LGUI", delay: 0, act: 0 }] }]);
+  assert.deepEqual(km.profiles[0].macrosUsed, [1]);
+  agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions); assert.equal(km.macros.length, 1);   // idempotent: re-running does not pile up macros
   // repair layout = only the KV_OAI_* positions; every other key on the layer is left alone
   const repair = DEFAULTS.layout.map((r) => r.map((k) => (/^KV_OAI_/.test(k) ? k : null)));
   const km2 = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KM_7", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]] } }] }] }; // stock pad + a user macro on row 3
   const fixed = agentKeymap(km2, repair, DEFAULTS.actions).profiles[0].layers[0].layout.keymap;
   assert.deepEqual(fixed[0], ["KV_OAI_AG00", "KV_OAI_AG01"]); assert.equal(fixed[2][0], "KM_7"); assert.equal(fixed[3][1], "KC_L");
   const keep = JSON.parse(JSON.stringify(DEFAULTS.layout)); keep[3][0] = null;
-  assert.equal(agentKeymap(km, keep, DEFAULTS.actions).profiles[0].layers[0].layout.keymap[3][0], "KC_NONE"); // null keeps the pad's key
+  assert.equal(agentKeymap(km, keep, DEFAULTS.actions).profiles[0].layers[0].layout.keymap[3][0], "KA_A1"); // null keeps the pad's key (the macro from above)
   assert.throws(() => agentKeymap(km, [["KC_A"]], DEFAULTS.actions), /shape/);       // wrong pad
   assert.throws(() => agentKeymap(km, DEFAULTS.layout, { approve: "ACT06", reject: "ACT08" }), /ACT06/); // action key missing from layout
 }

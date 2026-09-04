@@ -56,14 +56,14 @@ const DEFAULTS = {
   keys: "off",          // backlight of the non-agent keys. "off" = dark (what Codex does — the status keys pop); "keymap" = the pad's stored backlight; or {effect,color,brightness,speed}
   actions: { approve: "ACT07", reject: "ACT08" }, // Codex Micro factory caps: ACT07 = APPR, ACT08 = REJ
   // what `setup-keys` writes to layer 1 (rows of 2/4/4/3). AGnn = agent keys, KV_OAI_ACTnn = keys reported to cm2d,
-  // anything else is a plain keycode, null keeps whatever is on the pad. Spare keys default to Esc (interrupt Claude)
-  // and inert; shortcuts with modifiers (Win+H voice typing, Ctrl+N) are Input macros: build them in the Input app,
-  // then set those positions to null here so setup-keys never overwrites them.
+  // a plain keycode types that key, an ARRAY is a chord written as an on-pad macro (modifiers held, last key
+  // clicked: ["KC_LGUI","KC_H"] = Win+H), null keeps whatever is on the pad. Spares default to Esc (interrupt
+  // Claude), Win+H (Windows voice typing, the Codex mic key's job), and inert.
   layout: [
     ["KV_OAI_AG00", "KV_OAI_AG01"],
     ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
     ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"],
-    ["KC_NONE", "KC_NONE", "KC_NONE"],
+    [["KC_LGUI", "KC_H"], "KC_NONE", "KC_NONE"],
   ],
 };
 
@@ -436,12 +436,26 @@ async function run(dir) {
 }
 
 // ---------------------------------------------------------------- keymap helpers
-/** Write `layout` over layer 1 of the active profile (everything else in the keymap is left alone). */
+/** Write `layout` over layer 1 of the active profile (everything else in the keymap is left alone).
+ *  A chord (array of keycodes) becomes an on-pad macro in the keymap's `macros` list, in the shape the Input app
+ *  writes: {id, name, actions:[{kc, delay, act}]} with act 1 = press, 2 = click, 0 = release, bound as KA_A<id>. */
 function agentKeymap(km, layout, actions) {
-  const rows = km.profiles[km.activeProfileId ?? 0].layers[0].layout.keymap;
+  const profile = km.profiles[km.activeProfileId ?? 0], rows = profile.layers[0].layout.keymap;
   if (rows.length !== layout.length || rows.some((r, i) => r.length !== layout[i].length)) throw new Error("layout shape does not match the pad's keymap");
-  for (const k of Object.values(actions)) if (!layout.flat().includes("KV_OAI_" + k)) throw new Error(`actions.${k} is not in layout`);
-  layout.forEach((r, i) => r.forEach((k, j) => { if (k !== null) rows[i][j] = k; })); // null = keep what the pad has (your Input macros survive)
+  const flat = layout.flat().map((k) => (Array.isArray(k) ? "chord" : k));
+  for (const k of Object.values(actions)) if (!flat.includes("KV_OAI_" + k)) throw new Error(`actions.${k} is not in layout`);
+  km.macros = (km.macros || []).filter((m) => !/^cm2d /.test(m.name)); // ours are regenerated every time; the user's stay
+  let nextId = Math.max(0, ...km.macros.map((m) => m.id)) + 1;
+  layout.forEach((r, i) => r.forEach((k, j) => {
+    if (k === null) return;
+    if (!Array.isArray(k)) { rows[i][j] = k; return; }
+    const mods = k.slice(0, -1), last = k[k.length - 1], id = nextId++;
+    km.macros.push({ id, name: `cm2d ${k.join("+")}`, actions: [...mods.map((kc) => ({ kc, delay: 0, act: 1 })), { kc: last, delay: 0, act: 2 }, ...mods.slice().reverse().map((kc) => ({ kc, delay: 0, act: 0 }))] });
+    rows[i][j] = `KA_A${id}`;
+  }));
+  const used = new Set(profile.layers.flatMap((l) => l.layout.keymap.flat()).map((k) => /^KA_A(\d+)$/.exec(k || "")?.[1]).filter(Boolean).map(Number));
+  km.macros = km.macros.filter((m) => used.has(m.id) || !/^cm2d /.test(m.name));
+  profile.macrosUsed = [...used].sort((a, b) => a - b);
   return km;
 }
 
