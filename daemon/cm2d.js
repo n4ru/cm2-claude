@@ -378,9 +378,16 @@ async function run(dir) {
     try {
       if (key === cfg.actions.talk) {
         if (act !== 1 && act !== 0) return;
+        if ((act === 1) === talkHeld) return;                       // auto-repeat while held, or a stray release
         talkHeld = act === 1;
-        sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (talkHeld ? "d" : "u") : "t");
-        log(`talk: ${talkHeld ? "listening" : "stop"}`); clearTimeout(pushTimer); return push();
+        sendKeys(cfg.talkKeys, cfg.talkMode === "hold" ? (talkHeld ? "d" : "u") : "t");   // shortcut first: the mic matters more than the light
+        log(`talk: ${talkHeld ? "listening" : "stop"}`);
+        if (pad) {                                                  // one RPC for the light instead of the full two-command push
+          const { top } = engine.render();
+          pad.setZones(zone(cfg.ambient[top], cfg.colors[top], cfg.brightness), talkHeld ? { e: 1, b: cfg.brightness, s: 0, m: 0, c: cfg.colors.error } : keysZone).catch((e) => log("talk light:", e.message));
+          lastSent = "";
+        }
+        return;
       }
       if (act !== 1) return;
       const m = /^AG0([0-5])$/.exec(key || "");
