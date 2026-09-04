@@ -81,6 +81,11 @@ assert.deepEqual(zone(null), { e: 0, b: 0, s: 0, m: 0, c: 0 });
   assert.deepEqual(km.profiles[0].macrosUsed, [1]);
   agentKeymap(km, chords, DEFAULTS.actions); assert.equal(km.macros.length, 1);          // idempotent: re-running does not pile up macros
   agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions); assert.equal(km.macros.length, 0);  // chord removed from the layout: its macro goes too
+  // dial / joystick / stored lighting: written only when given, otherwise left alone
+  const L = km.profiles[0].layers[0];
+  agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions, { encoders: [["KC_UP", "KC_DOWN", "KC_ENT"]], joystick: { type: "JOYSTICK", sectors: [] } });
+  assert.deepEqual(L.layout.encoders, [["KC_UP", "KC_DOWN", "KC_ENT"]]); assert.deepEqual(L.layout.joystick, { type: "JOYSTICK", sectors: [] });
+  agentKeymap(km, DEFAULTS.layout, DEFAULTS.actions, { encoders: null }); assert.deepEqual(L.layout.encoders, [["KC_UP", "KC_DOWN", "KC_ENT"]]);
   // repair layout = only the KV_OAI_* positions; every other key on the layer is left alone
   const repair = DEFAULTS.layout.map((r) => r.map((k) => (/^KV_OAI_/.test(k) ? k : null)));
   const km2 = { activeProfileId: 0, profiles: [{ layers: [{ layout: { keymap: [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KM_7", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]] } }] }] }; // stock pad + a user macro on row 3

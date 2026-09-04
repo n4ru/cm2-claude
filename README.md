@@ -152,9 +152,18 @@ Icons are cosmetic; the switch positions are what matters.
 
 ## Config
 
+This is the configurator. The pad's entire configuration is two JSON files on the
+device (`keymap.json`, `smart_actions.json`); `backup` copies them out,
+`restore` puts a copy back, `setup-keys` applies the config below to layer 1,
+and the daemon drives lighting live. The original pre-cm2d keymap is kept as
+`keymap.before.json` and every `setup-keys` leaves a timestamped
+`keymap.backup-*.json` next to the daemon.
+
 Optional `daemon/config.json`, any subset of the defaults at the top of `cm2d.js`:
-`port`, `holdMs` (0 disables pad approvals), `brightness`, `colors`, `layout`
-(what `setup-keys` writes), `talkKeys`/`talkMode` (hold-to-talk), `ambient`
+`port`, `holdMs` (0 disables pad approvals), `brightness`, `colors`, `layout`,
+`encoders`, `joystick`, `lights` (what `setup-keys` writes: the 13 keys, the
+dial, the joystick and the pad's own stored lighting; null keeps what the pad
+has), `talkKeys`/`talkMode` (hold-to-talk), `ambient`
 (per-state body ring effect; `idle: {effect: "off"}` mirrors Codex, or give it a
 colour), `keys` (backlight of the non-agent keys: `"off"` by default so the
 status keys pop, like Codex; `"keymap"` for the pad's stored backlight; or an

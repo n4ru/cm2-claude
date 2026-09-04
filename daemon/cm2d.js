@@ -71,6 +71,10 @@ const DEFAULTS = {
     ["KC_ESC", "KV_OAI_ACT07", "KV_OAI_ACT08", "KC_NONE"],
     ["KV_OAI_ACT10", "KC_NONE", "KC_NONE"],
   ],
+  // the rest of layer 1, written verbatim by setup-keys when set; null keeps what the pad has.
+  encoders: null,   // e.g. [["KC_VOLU", "KC_VOLD", "KC_MPLY"]]  = dial clockwise, counter-clockwise, press
+  joystick: null,   // e.g. {"type": "JOYSTICK", "sectors": []} or {"type": "RADIAL", "sectors": [{"k": "KC_UP", "a1": 0.875, "a2": 0.125}, ...]}
+  lights: null,     // the pad's own stored lighting when nothing drives it, e.g. {"backlight": {"effect": "solid", "brightness": 1, "speed": 0.5, "magic": 1, "color": 16777215}, "underglow": {...}}
 };
 
 function loadConfig(dir) {
@@ -518,8 +522,11 @@ async function run(dir) {
 /** Write `layout` over layer 1 of the active profile (everything else in the keymap is left alone).
  *  A chord (array of keycodes) becomes an on-pad macro in the keymap's `macros` list, in the shape the Input app
  *  writes: {id, name, actions:[{kc, delay, act}]} with act 1 = press, 2 = click, 0 = release, bound as KA_A<id>. */
-function agentKeymap(km, layout, actions) {
-  const profile = km.profiles[km.activeProfileId ?? 0], rows = profile.layers[0].layout.keymap;
+function agentKeymap(km, layout, actions, extras = {}) {
+  const profile = km.profiles[km.activeProfileId ?? 0], layer = profile.layers[0], rows = layer.layout.keymap;
+  if (extras.encoders) layer.layout.encoders = extras.encoders;
+  if (extras.joystick) layer.layout.joystick = extras.joystick;
+  if (extras.lights) layer.lights = extras.lights;
   if (rows.length !== layout.length || rows.some((r, i) => r.length !== layout[i].length)) throw new Error("layout shape does not match the pad's keymap");
   km.macros = (km.macros || []).filter((m) => !/^cm2d /.test(m.name)); // ours are regenerated every time; the user's stay
   let nextId = Math.max(0, ...km.macros.map((m) => m.id)) + 1;
@@ -592,7 +599,7 @@ async function main(argv) {
         const km = await pad.readKeymap();
         const bak = path.join(dir, `keymap.backup-${Date.now()}.json`);
         fs.writeFileSync(bak, JSON.stringify(km, null, 2));
-        await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions));
+        await pad.writeKeymap(agentKeymap(km, cfg.layout, cfg.actions, { encoders: cfg.encoders, joystick: cfg.joystick, lights: cfg.lights }));
         console.log("agent keys written; previous keymap saved to", bak); break;
       }
       default: console.error("usage: cm2d run|status|backup F|restore F|setup-keys|install|uninstall|stop|restart|press KEY|state|demo"); process.exitCode = 2;
